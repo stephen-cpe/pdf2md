@@ -10,6 +10,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ENTRYPOINT = Path(__file__).resolve().parents[2] / "src" / "__main__.py"
 
 
@@ -86,8 +88,15 @@ def test_policy_in_effect_at_runtime() -> None:
     subprocess.run([sys.executable, "-c", code], check=True, capture_output=True, timeout=60)
 
 
-def test_entrypoint_runs() -> None:
-    """python -m src exits clean (loads config from .env)."""
+def test_entrypoint_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """python -m src exits clean. Fresh-clone safe: fake secrets come
+    from env vars, so no .env file is required (env vars are inherited
+    by the subprocess; a developer's real .env, when present, also works)."""
+    for key, value in (
+        ("OLLAMA_API_KEY", "unit-test-fake-key"),
+        ("DATABASE_URL", "postgresql+asyncpg://u:unit-test@localhost:5432/db"),
+    ):
+        monkeypatch.setenv(key, value)
     proc = subprocess.run(
         [sys.executable, "-m", "src"],
         capture_output=True,
