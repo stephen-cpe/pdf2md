@@ -1,10 +1,10 @@
--- init_db.sql — reset the pdf2md database schema from scratch.
+-- init_db.sql — reset the pdf2md database: drops all conversion data
+-- (jobs, pages, images, events), the version row, and orphaned enum types.
+-- Safe to re-run (every statement is IF EXISTS guarded).
 --
--- Run (server stopped):
---   psql -U postgres -d pdf2md -f init_db.sql
--- Then rebuild everything from the migrations (single source of truth):
+--   psql -U postgres -h localhost -d pdf2md -f init_db.sql
 --   venv\Scripts\python -m alembic upgrade head
---   venv\Scripts\python -m alembic current   (must print the head revision)
+--   venv\Scripts\python -m alembic current   (must print "a73cb35dc5f1 (head)")
 --
 -- Drops ALL conversion data (jobs, pages, images, events) plus the native
 -- PG enum types (which plain table drops leave orphaned and which break a

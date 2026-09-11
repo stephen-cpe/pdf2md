@@ -42,7 +42,14 @@ async def _next_event(stream: AsyncGenerator[dict[str, Any]]) -> dict[str, Any]:
     return await stream.__anext__()
 
 
-async def _stream_live_events(bus: EventBus, websocket: WebSocket) -> None:
+# Idle keepalive: pages can run 20+ min with zero bus events (local OCR on
+# CPU), and idle WebSockets get reaped by browsers/intermediaries. A ping
+# every interval keeps the socket alive and lets the client detect death.
+# Must stay well under common 60s idle timeouts.
+WS_HEARTBEAT_SECONDS = 20.0
+
+
+async def _stream_live_events(bus: EventBus, websocket: WebSocket, job_id: str = "") -> None:
     """Forward live bus events until the client disconnects.
 
     Races the subscription against websocket.receive(): the protocol
@@ -53,6 +60,11 @@ async def _stream_live_events(bus: EventBus, websocket: WebSocket) -> None:
     down the force-quit path. Disconnect is a normal return (the replay
     buffer retains history); genuine cancellation propagates to the
     caller (ws_job converts it to a normal exit — see below).
+
+    Long OCR/QA gaps emit nothing, so an idle socket would look dead to
+    intermediaries. On wait timeout a lightweight {"event": "ping"}
+    keepalive is sent instead (clients ignore it); a reconnecting client
+    replays missed events from the buffer.
     """
     stream = bus.subscribe()
     get_task: asyncio.Task[dict[str, Any]] | None = None
@@ -64,8 +76,18 @@ async def _stream_live_events(bus: EventBus, websocket: WebSocket) -> None:
             if recv_task is None:
                 recv_task = asyncio.create_task(websocket.receive())
             done, _pending = await asyncio.wait(
-                {get_task, recv_task}, return_when=asyncio.FIRST_COMPLETED
+                {get_task, recv_task},
+                timeout=WS_HEARTBEAT_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED,
             )
+            if not done:
+                # Idle gap (long OCR page): keepalive so the socket is not
+                # reaped; a dead client surfaces here as a send error.
+                try:
+                    await websocket.send_json({"event": "ping", "job_id": job_id})
+                except WebSocketDisconnect, RuntimeError:
+                    return
+                continue
             if recv_task in done:
                 try:
                     recv_task.result()
@@ -605,7 +627,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     await websocket.send_json(event)
             except WebSocketDisconnect, RuntimeError:
                 return  # gone before the live stream even started
-            await _stream_live_events(bus, websocket)
+            await _stream_live_events(bus, websocket, str(uid))
         except asyncio.CancelledError:
             # Task teardown (server shutdown, harness close, force quit):
             # the finally below already unwound everything (socket

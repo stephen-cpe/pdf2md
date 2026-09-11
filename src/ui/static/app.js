@@ -1,6 +1,11 @@
 "use strict";
 const $ = (id) => document.getElementById(id);
 let currentJob = null, ws = null, timerHandle = null, startedAt = 0, lastTotal = 0;
+// Resilient watch state: a single WS never survives 20+ min OCR gaps, so
+// reconnect on close (server replays missed events) + poll REST as fallback.
+let watchSeq = 0, pollHandle = null, reconnectHandle = null, jobDone = false;
+const seenEvents = new Set();
+const TERMINAL_STATUSES = ["completed", "failed", "cancelled", "paused"];
 
 function show(name) {
   for (const v of ["upload", "progress", "done", "history", "health"]) {
@@ -186,6 +191,11 @@ function updateControls(live, status) {
 async function watchJob(job_id) {
   currentJob = job_id;
   lastTotal = 0;
+  const seq = ++watchSeq;
+  jobDone = false;
+  seenEvents.clear();
+  if (pollHandle) { clearInterval(pollHandle); pollHandle = null; }
+  if (reconnectHandle) { clearTimeout(reconnectHandle); reconnectHandle = null; }
   show("progress");
   $("grid").innerHTML = "";
   $("log").innerHTML = "";
@@ -210,10 +220,24 @@ async function watchJob(job_id) {
   } catch (e) { /* progress still streams; bar fills in from events */ }
   if (!hinted) setActivity("connecting…", "");
   startClock();
-  if (ws) ws.close();
-  ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/jobs/" + job_id);
-  ws.onmessage = async (msg) => {
-    const e = JSON.parse(msg.data);
+  if (ws) { const old = ws; ws = null; try { old.close(); } catch (e) { /* already gone */ } }
+
+  function stopWatchTimers() {
+    if (pollHandle) { clearInterval(pollHandle); pollHandle = null; }
+    if (reconnectHandle) { clearTimeout(reconnectHandle); reconnectHandle = null; }
+  }
+
+  async function handleEvent(e) {
+    if (!e || e.event === "ping") return; // server keepalive for long OCR gaps
+    // Reconnects replay the full buffer: skip duplicates so the log does
+    // not double every history entry (page_update repaint is idempotent).
+    let key = null;
+    try { key = JSON.stringify(e); } catch (err) { key = null; }
+    if (key !== null) {
+      if (seenEvents.has(key)) return;
+      if (seenEvents.size > 2000) seenEvents.clear();
+      seenEvents.add(key);
+    }
     if (e.event === "stage_changed") {
       setActivity(`stage: ${e.stage} — ${STAGE_HINTS[e.stage] || ""}`, "");
       logLine(`[stage] ${e.stage}`);
@@ -233,8 +257,76 @@ async function watchJob(job_id) {
     } else if (e.event === "job_finished") {
       finishJob(job_id, e);
     }
-  };
-  ws.onclose = () => logLine("(stream closed)");
+  }
+
+  // REST fallback: if the stream dies mid-job (idle timeout, laptop sleep,
+  // server restart), polling still advances the grid and finishes the UI
+  // from the DB state once the driver completes.
+  async function pollOnce() {
+    if (seq !== watchSeq || jobDone || currentJob !== job_id) return;
+    let detail = null;
+    try {
+      detail = await (await fetch(`/api/v1/jobs/${job_id}`)).json();
+    } catch (e) { return; }
+    if (seq !== watchSeq || jobDone) return;
+    if (detail && detail.page_count) {
+      lastTotal = detail.page_count;
+      ensureGrid(detail.page_count);
+    }
+    try { await refreshGrid(); } catch (e) { /* next tick retries */ }
+    updateControls(detail.live, detail.status);
+    if (detail && TERMINAL_STATUSES.includes(detail.status) && !detail.live) {
+      finishJob(job_id, {
+        event: "job_finished",
+        job_id: job_id,
+        status: detail.status,
+        error: (detail.error && (detail.error.error || JSON.stringify(detail.error))) || detail.status,
+        output_path: "",
+      });
+    }
+  }
+
+  function connect() {
+    if (seq !== watchSeq || jobDone) return;
+    let socket = null;
+    try {
+      socket = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/jobs/" + job_id);
+    } catch (e) {
+      scheduleReconnect();
+      return;
+    }
+    ws = socket;
+    socket.onmessage = async (msg) => {
+      if (seq !== watchSeq) return;
+      let e = null;
+      try { e = JSON.parse(msg.data); } catch (err) { return; }
+      await handleEvent(e);
+    };
+    socket.onclose = () => {
+      if (seq !== watchSeq || jobDone || currentJob !== job_id) return;
+      if (ws === socket) ws = null;
+      logLine("(stream closed — reconnecting…)");
+      scheduleReconnect();
+    };
+    socket.onerror = () => {
+      try { socket.close(); } catch (e) { /* onclose reschedules */ }
+    };
+  }
+
+  function scheduleReconnect() {
+    if (seq !== watchSeq || jobDone || currentJob !== job_id) return;
+    if (reconnectHandle) return; // one pending attempt at a time
+    reconnectHandle = setTimeout(() => {
+      reconnectHandle = null;
+      // Poll immediately so a completed-while-away job finishes even if
+      // the socket is still down; then re-open the stream for replay.
+      pollOnce();
+      connect();
+    }, 3000);
+  }
+
+  connect();
+  pollHandle = setInterval(pollOnce, 10000);
 }
 
 async function refreshGrid() {
@@ -281,6 +373,11 @@ $("btn-restart").addEventListener("click", async () => {
 
 // --- completion (7.5) ---
 async function finishJob(job_id, event) {
+  if (currentJob !== job_id) return;
+  jobDone = true;
+  if (pollHandle) { clearInterval(pollHandle); pollHandle = null; }
+  if (reconnectHandle) { clearTimeout(reconnectHandle); reconnectHandle = null; }
+  if (ws) { const s = ws; ws = null; try { s.close(); } catch (e) { /* already gone */ } }
   stopClock();
   if (event.status === "paused") {
     setActivity("paused — press Resume (live) or Restart (from checkpoint).", "paused");

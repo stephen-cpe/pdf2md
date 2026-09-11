@@ -1,6 +1,6 @@
 # pdf2md — Hybrid-Agentic PDF → GitHub-Flavored Markdown Converter
 
-> **Disclaimer**
+## Disclaimer
 > This project is **experimental and for educational purposes only**. It is in a
 > **very early stage of development** and may contain numerous issues, bugs, and rough edges.
 > Expect breaking changes, incomplete features, and behavior that has only been validated
@@ -70,7 +70,7 @@ Use regular Command Prompt (`cmd`); steps needing Administrator rights are marke
 ## 2. Install (per clone)
 
 ```cmd
-git clone <repo-url> pdf2md
+git clone https://github.com/stephen-cpe/pdf2md.git pdf2md
 cd pdf2md
 python -m venv venv
 venv\Scripts\activate
@@ -121,7 +121,8 @@ venv\Scripts\python -m alembic current
 
 ## 4. Test corpus
 
-Put **at least 5 real PDFs** in `corpus\` (plus one small 2–5 page PDF for fast runs):
+`corpus\` is gitignored, so create it first, then put **at least 5 real
+PDFs** inside (plus one small 2–5 page PDF for fast runs):
 
 | # | Type | Why |
 |---|---|---|
@@ -217,31 +218,32 @@ cleanly (open WebSockets close quietly).
 ### Restart / reinitialize from scratch (Windows 11)
 
 Zero history: no jobs, no checkpoints, no embeddings, no workspaces, no
-deliverables. Stop the server first (Ctrl+C), then:
+deliverables. Stop the server first (Ctrl+C), then run all four steps in
+order from the project root. Step 1 drops the tables and only step 2
+rebuilds them — if step 2 did not apply, the app boots but every request
+fails with `relation "jobs" does not exist`.
 
 ```cmd
-REM 1. Empty the database (drops tables, version row, orphaned enum types)
-psql -U postgres -d pdf2md -f init_db.sql
-
-REM 2. Rebuild the schema from the migrations (single source of truth)
+psql -U postgres -h localhost -d pdf2md -f init_db.sql
 venv\Scripts\python -m alembic upgrade head
 venv\Scripts\python -m alembic current
 ```
 
+`current` must print `a73cb35dc5f1 (head)`. Empty output means the upgrade
+did not apply — do not continue; re-run the upgrade and read its error.
+
 ```cmd
-REM 3. Delete generated state (keep mdtopdf.py, corpus\, .env, src\)
 rmdir /s /q workspace chroma
 del /q output\*.md output\*.pdf
 for /d %i in (output\*) do rmdir /s /q "%i"
-dir output
 ```
 
-`output\` should show only `mdtopdf.py` afterward. `corpus\` (inputs), `.env`
-(keys), and `src\` are never touched. If `upgrade head` ever fails with
-`type "jobstatus" already exists`, re-run `init_db.sql` and upgrade again.
+This deletes generated state only — `corpus\` (your PDFs), `.env` (your keys),
+and `src\` are never touched. If `upgrade head` ever fails with
+`type "jobstatus" already exists`, the old enum types survived the reset:
+re-run `init_db.sql` and upgrade again.
 
 ```cmd
-REM 4. Launch and verify the clean slate
 python app.py
 ```
 
@@ -260,6 +262,7 @@ first — Windows file locks).
 | Ollama `curl` fails | Launch Ollama once from Start menu, retry |
 | `ollama list` missing models | `ollama pull glm-ocr` + `ollama pull qwen3-embedding:0.6b` |
 | Cloud key rejected | Recheck `OLLAMA_API_KEY` in `.env`; direct-check `/api/tags` |
+| `relation "jobs" does not exist` after a reset | Step 2 above did not apply — re-run `alembic upgrade head` and confirm `alembic current` prints `a73cb35dc5f1 (head)` before starting the app |
 
 ## Docs
 
