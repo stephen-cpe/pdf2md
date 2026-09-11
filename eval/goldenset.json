@@ -1,0 +1,209 @@
+{
+  "_comment": "Golden-set ground truth for retrieval evaluation. Each question is answerable strictly from its source PDF. 'expected' substrings must appear in the chunk(s) retrieved from the CORRECT pipeline's output; a hit at rank k means a retrieved chunk contains any expected substring. 'doc' must match the markdown filename stem in each pipeline's output directory.",
+  "questions": [
+    {
+      "doc": "bitcoin",
+      "question": "What is the proof-of-work difficulty determined by to compensate for increasing hardware speed?",
+      "expected": ["moving average", "blocks per hour"],
+      "source_page": 3
+    },
+    {
+      "doc": "bitcoin",
+      "question": "According to the paper, how is an electronic coin defined?",
+      "expected": ["chain of digital signatures"],
+      "source_page": 1
+    },
+    {
+      "doc": "bitcoin",
+      "question": "What happens to the probability of a slower attacker catching up as subsequent blocks are added?",
+      "expected": ["diminishes exponentially"],
+      "source_page": 3
+    },
+    {
+      "doc": "bitcoin",
+      "question": "What simplification is made when computing the median in the simplified payment verification section?",
+      "expected": ["longest chain"],
+      "source_page": 5
+    },
+    {
+      "doc": "bitcoin",
+      "question": "How much disk space per year would transactions take if blocks are generated every 10 minutes, and what does the paper conclude about storage?",
+      "expected": ["4.2MB", "storage should not be a problem"],
+      "source_page": 4
+    },
+    {
+      "doc": "bitcoin",
+      "question": "How do nodes prove blocks came from CPU power rather than IP addresses?",
+      "expected": ["one-CPU-one-vote", "one IP address one vote"],
+      "source_page": 3
+    },
+    {
+      "doc": "Open-Closed_Principle",
+      "question": "Who coined the open-closed principle and in what year?",
+      "expected": ["Bertrand Meyer", "1988"],
+      "source_page": 1
+    },
+    {
+      "doc": "Open-Closed_Principle",
+      "question": "What are the two primary attributes of modules that conform to the open-closed principle?",
+      "expected": ["Open For Extension", "Closed for Modification"],
+      "source_page": 2
+    },
+    {
+      "doc": "Open-Closed_Principle",
+      "question": "According to the article, what is the key to resolving the tension between being open for extension and closed for modification?",
+      "expected": ["Abstraction is the Key", "abstraction"],
+      "source_page": 3
+    },
+    {
+      "doc": "Open-Closed_Principle",
+      "question": "In the Shape example drawing squares and circles, why does the Shape class with a Draw CONST_TYPE enum violate the open-closed principle?",
+      "expected": ["switch", "must be changed"],
+      "source_page": 5
+    },
+    {
+      "doc": "Open-Closed_Principle",
+      "question": "What is the strategic closure mentioned at the end of the article and what should designers do about unanticipated changes?",
+      "expected": ["strategic closure", "anticipate changes", "conform to the common changes"],
+      "source_page": 11
+    },
+    {
+      "doc": "Interface_Segration_Principle",
+      "question": "What principle did the author discuss in the previous May 96 column before the Interface Segregation Principle?",
+      "expected": ["Dependency Inversion", "DIP"],
+      "source_page": 1
+    },
+    {
+      "doc": "Interface_Segration_Principle",
+      "question": "What are the three member functions of the Door interface in the security system example?",
+      "expected": ["Lock", "Unlock", "IsDoorOpen"],
+      "source_page": 2
+    },
+    {
+      "doc": "Interface_Segration_Principle",
+      "question": "What is the problem with fat interfaces, according to the Interface Segregation Principle?",
+      "expected": ["not cohesive", "fat", "polluted"],
+      "source_page": 1
+    },
+    {
+      "doc": "Interface_Segration_Principle",
+      "question": "How does the TimedDoor class communicate with the Timer object to sound an alarm?",
+      "expected": ["Timer", "alarm"],
+      "source_page": 2
+    },
+    {
+      "doc": "Interface_Segration_Principle",
+      "question": "What pattern does the author recommend for the timer client instead of a fat interface?",
+      "expected": ["multiple inheritance", "segregate"],
+      "source_page": 5
+    },
+    {
+      "doc": "Software-Product-Line-Evolution-Method",
+      "question": "What is kaizen and why is it adopted in Japanese industry?",
+      "expected": ["continuous improvement", "work standard"],
+      "source_page": 1
+    },
+    {
+      "doc": "Software-Product-Line-Evolution-Method",
+      "question": "What is a core asset in software product line engineering?",
+      "expected": ["reusable software-related assets", "more than one product"],
+      "source_page": 1
+    },
+    {
+      "doc": "Software-Product-Line-Evolution-Method",
+      "question": "What are the important points of the kaizen method for core asset evolution?",
+      "expected": ["work standard", "kaizen patterns", "kaizen processes"],
+      "source_page": 1
+    },
+    {
+      "doc": "Software-Product-Line-Evolution-Method",
+      "question": "What are the four types of core asset situations classified in the paper?",
+      "expected": ["Treasure", "Mixture of chaff and grain", "Gemstones", "Stones"],
+      "source_page": 3
+    },
+    {
+      "doc": "Software-Product-Line-Evolution-Method",
+      "question": "What tool or environment is used to manage core asset kaizen in the case study?",
+      "expected": ["repository", "version control", "configuration management"],
+      "source_page": 5
+    },
+    {
+      "doc": "Generative AI for Test Driven Development - arxiv",
+      "question": "What are the two collaboration patterns between developers and GenAI in the TDD workflow?",
+      "expected": ["collaborative", "fully-automated"],
+      "source_page": 1
+    },
+    {
+      "doc": "Generative AI for Test Driven Development - arxiv",
+      "question": "Which ChatGPT model did the experiment use and what context length does it have?",
+      "expected": ["gpt-3.5-turbo-16k", "16k"],
+      "source_page": 2
+    },
+    {
+      "doc": "Generative AI for Test Driven Development - arxiv",
+      "question": "What was the initial exercise given to the developers in the experiment?",
+      "expected": ["TextFormatter", "center"],
+      "source_page": 3
+    },
+    {
+      "doc": "Generative AI for Test Driven Development - arxiv",
+      "question": "What were the main findings about GenAI use in TDD from the experiment?",
+      "expected": ["supervision", "mislead"],
+      "source_page": 1
+    },
+    {
+      "doc": "Generative AI for Test Driven Development - arxiv",
+      "question": "Which TDD pattern should be used in the first iteration according to the workflow?",
+      "expected": ["Assertion First", "stubs and drivers"],
+      "source_page": 3
+    },
+    {
+      "doc": "scanned_knowledge_handbook",
+      "question": "According to Chapter 1, how much does replacing a departing expert cost once everything is counted?",
+      "expected": ["200 and 300", "annual salary"],
+      "source_page": 1
+    },
+    {
+      "doc": "scanned_knowledge_handbook",
+      "question": "What are the key principles of durable knowledge capture listed in the handbook?",
+      "expected": ["Write it while doing it", "rejected alternatives", "searchable notes"],
+      "source_page": 1
+    },
+    {
+      "doc": "scanned_knowledge_handbook",
+      "question": "What is the retention decay formula given in Chapter 2?",
+      "expected": ["R(t)", "tau", "e^(-t"],
+      "source_page": 2
+    },
+    {
+      "doc": "scanned_knowledge_handbook",
+      "question": "What is the recommended review cadence and owner for an architecture decision record?",
+      "expected": ["On relevant change", "Tech lead"],
+      "source_page": 2
+    },
+    {
+      "doc": "scanned_knowledge_handbook",
+      "question": "Why does the handbook say a wrong page is worse than an empty page?",
+      "expected": ["damages trust", "misleading"],
+      "source_page": 2
+    },
+    {
+      "doc": "scanned_knowledge_handbook",
+      "question": "In the Decision Ledger pattern, why do the rejected options matter most?",
+      "expected": ["re-litigating", "settled", "rejected option again"],
+      "source_page": 3
+    },
+    {
+      "doc": "scanned_knowledge_handbook",
+      "question": "What are the three practical capture patterns described in Chapter 3?",
+      "expected": ["Decision Ledger", "Five-Minute Brain Dump", "Walking Tour"],
+      "source_page": 3
+    },
+    {
+      "doc": "scanned_knowledge_handbook",
+      "question": "What is the purpose of the Walking Tour pattern for new team members?",
+      "expected": ["documentation failed", "confusion", "fresh notes"],
+      "source_page": 3
+    }
+  ]
+}

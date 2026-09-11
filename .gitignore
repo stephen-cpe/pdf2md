@@ -1,0 +1,33 @@
+# --- Secrets & local state (never commit) ---
+.env
+chroma/
+output/
+*workspace*/
+*workspaces*/
+corpus/
+
+# --- Python ---
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# --- Editors ---
+.vscode/
+.idea/
+
+# --- Others ---
+*.bak
+*.exe
+
+# --- Eval harness artifacts (generated; scripts + goldenset are committed) ---
+eval/baseline-md/
+eval/pdf2md-md/
+eval/ocp-agentic-md/
+eval/results*.json
+.codedump/
+

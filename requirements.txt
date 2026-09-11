@@ -1,0 +1,25 @@
+fastapi>=0.141.1
+uvicorn>=0.52.4
+starlette>=1.6.0
+httpx>=0.28.1
+python-multipart>=0.0.32
+pydantic>=2.13.5
+pydantic-settings>=2.15.0
+python-dotenv>=1.2.3
+pymupdf>=1.28.2
+pymupdf4llm>=1.28.2
+pillow>=12.3.0
+ollama>=0.6.2
+sqlalchemy>=2.0.52
+alembic>=1.19.2
+asyncpg>=0.31.0
+chromadb>=1.5.9
+pymarkdownlnt>=0.9.39
+mdformat>=1.0.0
+mdformat-gfm>=1.0.0
+
+# --- dev tools (checks + tests) ---
+pytest>=9.1.1
+pytest-asyncio>=1.4.0
+ruff>=0.16.7
+mypy>=2.3.1

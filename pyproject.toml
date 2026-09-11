@@ -1,0 +1,78 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pdf2md"
+version = "0.0.1"
+description = "PDF2MD-Agent — Agentic PDF to GitHub-Flavored Markdown Converter"
+readme = "README.md"
+requires-python = ">=3.14,<3.15"
+dependencies = [
+  "fastapi",
+  "uvicorn",
+  "starlette",
+  "httpx",
+  "python-multipart",
+  "pydantic",
+  "pydantic-settings",
+  "python-dotenv",
+  "pymupdf",
+  "pymupdf4llm",
+  "pillow>=11.0.0",
+  "ollama",
+  "sqlalchemy>=2",
+  "alembic",
+  "asyncpg",
+  "chromadb",
+  "pymarkdownlnt",
+  "mdformat",
+  "mdformat-gfm",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "pytest-asyncio",
+  "ruff>=0.16.7",
+  "mypy>=2.3.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint.per-file-ignores]
+# Health probes must never raise: any failure becomes a fail result.
+"src/health.py" = ["BLE001"]
+# Preflight must return a verdict, never crash on malformed PDFs.
+"src/pdf.py" = ["BLE001"]
+# FastAPI dependency declarations (File()/Form() defaults) are the framework idiom.
+"src/api/app.py" = ["B008"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+
+# PyMuPDF is a partially-typed C extension: untyped-call noise is the
+# library's, not ours. Our own annotations stay strict.
+[[tool.mypy.overrides]]
+module = ["src.pdf", "src.render_slice", "src.pipeline.routing", "src.pipeline.hashes", "src.pipeline.visual", "src.pipeline.pages"]
+disable_error_code = "no-untyped-call"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-m 'not live'"
+markers = [
+  "unit: no network/DB/Ollama",
+  "integration: real Postgres/Chroma/local Ollama, cloud mocked",
+  "live: real GLM-OCR + Cloud (never in default runs; burns quota)",
+]

@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  unit:
+    name: unit tests + lint + types (windows, py3.14)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install project + dev tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e . --no-deps
+
+      - name: Ruff format check
+        run: python -m ruff format --check src tests eval
+
+      - name: Ruff lint
+        run: python -m ruff check src tests eval
+
+      - name: Mypy (strict)
+        run: python -m mypy src
+
+      - name: Unit tests (no network/DB/Ollama)
+        run: python -m pytest tests/unit -q
+
+      - name: Config smoke (entry point)
+        env:
+          OLLAMA_API_KEY: ci-fake-key
+          DATABASE_URL: postgresql+asyncpg://user:pass@localhost:5432/db
+        run: python -m src

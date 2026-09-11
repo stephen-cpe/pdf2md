@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pdf2md</title>
+<link rel="icon" type="image/png" href="/favicon.png">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<header><img class="logo" src="/favicon.png" alt="pdf2md logo"><h1>pdf2md</h1><nav>
+<button data-view="upload">Upload</button>
+<button data-view="history">History</button>
+<button data-view="health">Health</button>
+</nav></header>
+<main>
+<section id="view-upload">
+<h2>Convert a PDF</h2>
+<div id="dropzone" tabindex="0">Drop a PDF here or <input type="file" id="file" accept=".pdf"></div>
+<label>Output directory <input type="text" id="output_dir" size="50">
+<button id="browse" type="button">Browse…</button></label>
+<span id="output_hint" class="hint"></span>
+<dialog id="picker">
+<h3>Choose output folder</h3>
+<p id="picker-path" class="hint"></p>
+<div><button id="picker-up" type="button">↑ Up</button></div>
+<ul id="picker-list"></ul>
+<div><button id="picker-select" type="button">Select this folder</button>
+<button id="picker-cancel" type="button">Cancel</button></div>
+</dialog>
+<details><summary>Options</summary>
+<label>DPI <input type="number" id="opt_dpi" value="200" min="72" max="400"></label>
+<label>Coverage threshold <input type="number" id="opt_cov" value="95" min="0" max="100"></label>
+<label>TOC <input type="checkbox" id="opt_toc" checked></label>
+<label>Figure details <input type="checkbox" id="opt_fig" checked></label>
+</details>
+<p class="privacy">Privacy notice: page images are sent to Ollama Cloud for the agent stage. OCR stays local.</p>
+<button id="start">Start conversion</button>
+<p id="upload_error" class="error"></p>
+</section>
+<section id="view-progress" hidden>
+<h2>Progress</h2>
+<div id="statusline"><span class="activity" id="activity">connecting…</span><span class="elapsed" id="elapsed"></span></div>
+<progress id="bar" max="100" value="0"></progress>
+<span id="counter"></span> <span id="pct" class="hint"></span>
+<div><button id="btn-pause">Pause</button><button id="btn-resume">Resume</button><button id="btn-restart" hidden>Restart</button><button id="btn-cancel">Cancel</button></div>
+<p class="hint">Note: local OCR runs partly on CPU on most machines — a dense page can take several minutes with no new events. The elapsed clock and current activity above are the heartbeat.</p>
+<details id="grid-details">
+<summary><h3 style="display:inline">Pages (peek at the current page)</h3></summary>
+<div id="grid"></div>
+</details>
+<h3>Log</h3><pre id="log"></pre>
+<details id="preview-details">
+<summary><h3 style="display:inline">Preview</h3></summary>
+<div id="preview"></div>
+</details>
+</section>
+<section id="view-done" hidden>
+<h2>Result</h2>
+<p id="done-path"></p>
+<a id="dl-md" href="#">Download Markdown</a> | <a id="dl-report" href="#">Download report</a>
+<p id="dl-error" class="error"></p>
+<h3>Conversion summary</h3><pre id="done-summary"></pre>
+<h3>Needs review</h3><div id="review-list"></div>
+</section>
+<section id="view-history" hidden>
+<h2>Job history</h2><ul id="history-list"></ul>
+</section>
+<section id="view-health" hidden>
+<h2>Setup / health</h2><ul id="health-list"></ul>
+</section>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>

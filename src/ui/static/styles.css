@@ -1,0 +1,87 @@
+/* pdf2md terminal theme: black + green, amber for warnings, red for errors. */
+:root {
+  --bg: #000000;
+  --panel: #0a0f0a;
+  --green: #33ff66;
+  --green-dim: #1a9955;
+  --amber: #ffbb33;
+  --red: #ff5555;
+  --muted: #88aa99;
+}
+body {
+  font-family: Consolas, "Cascadia Mono", Menlo, monospace;
+  background: var(--bg);
+  color: var(--green);
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 1em;
+}
+header { display: flex; gap: 1em; align-items: center; border-bottom: 1px solid var(--green-dim); margin-bottom: 1em; }
+header h1 { color: var(--green); margin: 0; }
+header img.logo { height: 1.8em; width: 1.8em; }
+nav button, button {
+  background: var(--panel);
+  color: var(--green);
+  border: 1px solid var(--green-dim);
+  border-radius: 4px;
+  padding: 0.4em 1em;
+  cursor: pointer;
+  font: inherit;
+}
+nav button:hover, button:hover { background: var(--green-dim); color: #000; }
+button:disabled { opacity: 0.4; cursor: default; }
+input[type="text"], input[type="number"] {
+  background: var(--panel);
+  color: var(--green);
+  border: 1px solid var(--green-dim);
+  border-radius: 4px;
+  padding: 0.4em;
+  font: inherit;
+}
+input[type="file"] { color: var(--green); }
+a { color: var(--green); }
+#dropzone { border: 2px dashed var(--green-dim); padding: 2em; text-align: center; margin: 1em 0; }
+#dropzone.over { border-color: var(--green); background: #061006; }
+.error { color: var(--red); }
+.hint { color: var(--muted); font-size: 0.9em; }
+.privacy { background: #141000; border: 1px solid var(--amber); color: var(--amber); padding: 0.5em; border-radius: 6px; }
+/* Status line: the thing you stare at for 15 minutes. */
+#statusline {
+  background: var(--panel);
+  border: 1px solid var(--green-dim);
+  border-radius: 6px;
+  padding: 0.8em;
+  margin: 1em 0;
+  font-size: 1.1em;
+}
+#statusline .activity { color: var(--green); }
+#statusline .elapsed { color: var(--muted); float: right; }
+#statusline.paused .activity { color: var(--amber); }
+#statusline.failed .activity, #statusline.failed { color: var(--red); border-color: var(--red); }
+progress { width: 100%; height: 1.4em; accent-color: var(--green); }
+#grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 4px; margin: 1em 0; }
+.cell { border: 1px solid var(--green-dim); border-radius: 4px; padding: 4px; font-size: 0.8em; text-align: center; color: var(--muted); }
+.cell.verified { background: #062b16; color: var(--green); border-color: var(--green); }
+.cell.needs_review { background: #2b2306; color: var(--amber); border-color: var(--amber); }
+.cell.processing { border-color: var(--amber); color: var(--amber); animation: blink 1.2s infinite; }
+@keyframes blink { 50% { opacity: 0.45; } }
+#log { background: var(--panel); border: 1px solid var(--green-dim); max-height: 220px; overflow: auto; padding: 0.5em; font-size: 0.85em; }
+#log .warn { color: var(--amber); }
+#log .err { color: var(--red); }
+dialog {
+  background: var(--panel);
+  color: var(--green);
+  border: 1px solid var(--green);
+  border-radius: 8px;
+  min-width: 420px;
+  max-width: 90vw;
+}
+dialog::backdrop { background: rgba(0, 0, 0, 0.7); }
+#picker-list { list-style: none; padding: 0; max-height: 300px; overflow: auto; }
+#picker-list li { padding: 0.3em; cursor: pointer; }
+#picker-list li:hover { background: var(--green-dim); color: #000; }
+#preview { border: 1px solid var(--green-dim); border-radius: 6px; padding: 1em; max-height: 400px; overflow: auto; background: var(--panel); }
+#preview img { max-width: 100%; }
+#preview h1, #preview h2, #preview h3 { color: var(--green); }
+pre { white-space: pre-wrap; }
+details summary { cursor: pointer; color: var(--muted); }
