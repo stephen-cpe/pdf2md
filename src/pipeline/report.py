@@ -1,8 +1,9 @@
-"""Output writer + conversion report and document embeddings.
+"""Output writer + conversion report.
 
 Report carries every AC-7 field: per-page coverage/retries/omissions/tokens/
-timings/telemetry, needs_review list, token totals, wall-clock, and the full
-config snapshot (models, DPI, prompt versions, pipeline_version).
+timings/telemetry, needs_review list, token totals, wall-clock, the full
+config snapshot (models, DPI, prompt versions, pipeline_version), and the
+diagram→Mermaid conversion summary (the primary capability).
 """
 
 import datetime
@@ -13,9 +14,9 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.chroma import ChromaStore
 from src.db import repo
-from src.db.models import Job, Page
+from src.db.models import Image, Job, Page
+from src.pipeline.gfm import github_math_safe
 
 
 @dataclass(frozen=True)
@@ -41,10 +42,8 @@ def build_report(
     pipeline_version: str,
     prompt_versions: dict[str, str],
     furniture_removed: list[dict[str, object]],
-    qa_applied: int,
-    qa_rejected: int,
-    qa_log: list[dict[str, object]] | None = None,
     lint_warnings: list[str],
+    images: list[Image] | None = None,
     orphaned_figures: list[dict[str, object]] | None = None,
 ) -> str:
     """Render conversion-report.md (FR-QA-4, AC-7)."""
@@ -60,12 +59,8 @@ def build_report(
         f"- tokens: prompt={total_prompt} completion={total_completion}",
         f"- pipeline_version: {pipeline_version}",
         f"- prompts: {prompt_versions}",
-        (
-            f"- models: agent={job.options.get('agent_model')} "
-            f"ocr={job.options.get('ocr_model')} embed={job.options.get('embed_model')}"
-        ),
+        (f"- models: agent={job.options.get('agent_model')} ocr={job.options.get('ocr_model')}"),
         f"- dpi: {job.options.get('render_dpi')}",
-        f"- qa: applied={qa_applied} rejected={qa_rejected}",
         f"- lint warnings: {len(lint_warnings)}",
         "",
         "## Per-page coverage",
@@ -82,6 +77,8 @@ def build_report(
         )
     review = [page.page_number for page in pages if page.needs_review]
     lines += ["", "## needs_review pages", "", str(review) if review else "none"]
+    lines += ["", "## Diagram → Mermaid conversion", ""]
+    lines += _conversion_section(images or [])
     lines += ["", "## Omissions log", ""]
     logged = False
     for page in sorted(pages, key=lambda p: p.page_number):
@@ -114,16 +111,6 @@ def build_report(
             f"verification_score={page.coverage_score} floor={floor_text} "
             f"hashes={page.source_page_hash}/{page.render_hash}/{page.ocr_hash}/{page.markdown_hash}"
         )
-    lines += ["", "## QA patches (applied + rejected, reversible)", ""]
-    if qa_log:
-        for entry in qa_log:
-            state = "applied" if entry.get("applied") else "rejected"
-            lines.append(
-                f"- [{state}] section={entry.get('section')!r} "
-                f"find={str(entry.get('find'))[:80]!r} reason={entry.get('reason', '')}"
-            )
-    else:
-        lines.append("none")
     lines += ["", "## Figures placed without placeholder (appended at page end)", ""]
     if orphaned_figures:
         for entry in orphaned_figures:
@@ -136,6 +123,31 @@ def build_report(
     lines += ["", "## Lint warnings (non-fatal)", ""]
     lines += [f"- {warning}" for warning in lint_warnings] or ["none"]
     return "\n".join(lines) + "\n"
+
+
+def _conversion_section(images: list[Image]) -> list[str]:
+    """Per-figure conversion table + headline conversion rate."""
+    if not images:
+        return ["none"]
+    mermaid = [img for img in images if img.conversion_status == "mermaid"]
+    table = [img for img in images if img.conversion_status == "table"]
+    image = [img for img in images if img.conversion_status not in ("mermaid", "table")]
+    rate = len(mermaid) / len(images) * 100.0
+    out = [
+        f"- figures: {len(images)}",
+        f"- converted to Mermaid: {len(mermaid)} ({rate:.0f}%)",
+        f"- data-table fallbacks: {len(table)}",
+        f"- image fallbacks: {len(image)}",
+        "",
+        "| page | index | type | status | confidence |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for img in sorted(images, key=lambda i: (i.page_number, i.id or 0)):
+        out.append(
+            f"| {img.page_number} | {img.id} | {img.diagram_type or ''} | "
+            f"{img.conversion_status or 'image'} | {img.confidence if img.confidence is not None else ''} |"
+        )
+    return out
 
 
 def _validate_docname(docname: str) -> str:
@@ -191,60 +203,15 @@ def write_output(
         for item in sorted(assets_src.iterdir()):
             if item.is_file():
                 shutil.copy2(item, assets_dir / item.name)
-    final_markdown = rewrite_asset_links_for_top_level(markdown, docname)
+    # GitHub strips one level of backslash-escaping from math before KaTeX;
+    # rewrite LaTeX punctuation for that transport (math spans only).
+    final_markdown = github_math_safe(markdown)
+    final_markdown = rewrite_asset_links_for_top_level(final_markdown, docname)
     markdown_path = output_dir / f"{docname}.md"
     markdown_path.write_text(final_markdown, encoding="utf-8")
     report_path = doc_dir / "conversion-report.md"
     report_path.write_text(report, encoding="utf-8")
     return Deliverable(markdown_path=markdown_path, assets_dir=assets_dir, report_path=report_path)
-
-
-def split_sections(markdown: str) -> list[tuple[str, str]]:
-    """Split final markdown into (heading, section-text) chunks for embeddings."""
-    import re
-
-    sections: list[tuple[str, str]] = []
-    heading: str = "(preamble)"
-    buff: list[str] = []
-    for line in markdown.splitlines():
-        if m := re.match(r"^(#{1,6})\s+(.*)$", line):
-            if "".join(buff).strip():
-                sections.append((heading, "\n".join(buff).strip()))
-            heading, buff = m.group(2).strip(), [line]
-        else:
-            buff.append(line)
-    if "".join(buff).strip():
-        sections.append((heading, "\n".join(buff).strip()))
-    return sections
-
-
-def persist_document_embeddings(store: ChromaStore, docname: str, markdown: str) -> int:
-    """Embed hierarchical child chunks into `documents` (6.6, FR-QA-5).
-
-    Child chunks (paragraph/table-atomic, ≤ MAX_CHILD_TOKENS) with
-    heading-path metadata — a 12k-token section no longer becomes one
-    unusable embedding. Heading path rides in metadata; parent ids
-    enable small-to-big retrieval without re-chunking.
-    """
-    from src.pipeline.chunking import chunk_children
-
-    children = chunk_children(markdown, docname=docname)
-    if not children:
-        return 0
-    store.add_texts(
-        "documents",
-        [f"{child.id}" for child in children],
-        [child.text for child in children],
-        [
-            {
-                "docname": docname,
-                "heading": child.heading_path_str,
-                "parent_id": child.parent_id,
-            }
-            for child in children
-        ],
-    )
-    return len(children)
 
 
 async def collect_job_pages(session: AsyncSession, job_id: UUID) -> tuple[Job | None, list[Page]]:
@@ -260,12 +227,23 @@ async def collect_job_pages(session: AsyncSession, job_id: UUID) -> tuple[Job | 
     return job, list(rows)
 
 
+async def collect_job_images(session: AsyncSession, job_id: UUID) -> list[Image]:
+    """Ordered figure rows for the report's conversion summary."""
+    from sqlalchemy import select
+
+    rows = (
+        await session.scalars(
+            select(Image).where(Image.job_id == job_id).order_by(Image.page_number, Image.id)
+        )
+    ).all()
+    return list(rows)
+
+
 __all__ = [
     "Deliverable",
     "build_report",
+    "collect_job_images",
     "collect_job_pages",
-    "persist_document_embeddings",
     "rewrite_asset_links_for_top_level",
-    "split_sections",
     "write_output",
 ]

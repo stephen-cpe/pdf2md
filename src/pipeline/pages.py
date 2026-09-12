@@ -42,7 +42,6 @@ from src.pipeline.envelope import (
 from src.pipeline.hashes import file_hash, page_source_hash, text_hash
 from src.pipeline.ocr import OcrEngine
 from src.pipeline.resilience import PauseJob, resilient
-from src.pipeline.routing import RouteDecision, decide_route, extract_deterministic
 
 OcrCaller = OcrEngine
 AgentCaller = TranscriptionAgent
@@ -65,7 +64,6 @@ class PageDeps:
     coverage_floor_min_ocr_tokens: int = 30
     max_page_retries: int = 2
     rolling_context_pages: int = 3
-    hybrid_routing: bool = False
 
 
 @dataclass
@@ -79,7 +77,6 @@ class PageOutcome:
     coverage: int | None = None
     markdown: str = ""
     skipped: bool = False
-    route: str = "agentic"  # "agentic" | "deterministic"
 
 
 @dataclass
@@ -174,32 +171,6 @@ async def process_page(
             skipped=True,
         )
     render_path = renders_dir / render_filename(page_number)
-    # Hybrid routing: render the page (the verifier needs the image) but
-    # skip OCR entirely when a deterministic candidate survives routing —
-    # the native text layer is the character reference on that path.
-    deterministic_preflight: RouteDecision | None = None
-    if deps.hybrid_routing:
-        deterministic_preflight = decide_route(pdf_path, page_number)
-    if deterministic_preflight is not None and deterministic_preflight.deterministic:
-        info = await asyncio.to_thread(
-            deps.render_fn, pdf_path, page_number, deps.render_dpi, render_path
-        )
-        return await _cycles(
-            session,
-            job_id=job_id,
-            page_number=page_number,
-            pdf_path=pdf_path,
-            render_path=render_path,
-            ocr_text="",
-            width=info.width,
-            height=info.height,
-            dpi=deps.render_dpi,
-            ocr_ms_base=0.0,
-            deps=deps,
-            rolling_context=rolling_context,
-            outline=outline,
-            deterministic_attempt=deterministic_preflight,
-        )
     start = time.perf_counter()
     ocr_text, width, height, actual_dpi = await _render_ocr(
         pdf_path, page_number, deps.render_dpi, render_path, deps
@@ -408,7 +379,6 @@ async def _transcribe_verify_only(
 ) -> PageOutcome:
     """Transcribe+verify for a look-ahead page (render+OCR prefetched at base DPI)."""
     width, height = _render_dims(render_path)
-    deterministic_attempt = decide_route(pdf_path, page_number) if deps.hybrid_routing else None
     return await _cycles(
         session,
         job_id=job_id,
@@ -422,7 +392,6 @@ async def _transcribe_verify_only(
         deps=deps,
         rolling_context=rolling_context,
         outline=outline,
-        deterministic_attempt=deterministic_attempt,
     )
 
 
@@ -606,30 +575,6 @@ async def _render_ocr(
     return "", info.width, info.height, 72
 
 
-def _figures_from_markdown(markdown: str, page_number: int) -> list[dict[str, object]]:
-    """Figure payloads for a deterministic candidate's own FIG tokens.
-
-    pymupdf4llm emits HTML comments for image blocks; those do not follow
-    the agent's FIG contract, so this only rescues tokens that already
-    match the agent shape (rare). Deterministic pages normally carry zero
-    figures — the verifier rejects figure-bearing pages via the FIGURES
-    rule in the verification template, escalating them to the agentic
-    path where real figure resolution happens.
-    """
-    from src.pipeline.images import parse_placeholders
-
-    return [
-        {
-            "index": ref.index,
-            "bbox": list(ref.bbox),
-            "alt": f"Figure on page {page_number}",
-            "caption": None,
-        }
-        for ref in parse_placeholders(markdown)
-        if ref.page is None or ref.page == page_number
-    ]
-
-
 def _telemetry(
     render_path: Path,
     width: int,
@@ -674,13 +619,10 @@ async def _cycles(
     rolling_context: str,
     outline: str,
     ocr_ms_base: float = 0.0,
-    deterministic_attempt: RouteDecision | None = None,
 ) -> PageOutcome:
     """Shared verify-retry core for both loop variants (4.2).
 
     Retries re-render at higher DPI + re-OCR (FR-PDF-4/FR-OCR-2).
-    A deterministic_attempt (hybrid routing) is verified first; any
-    objection escalates to the agentic cycle below.
     """
     misses_note = ""
     best_markdown = ""
@@ -695,111 +637,10 @@ async def _cycles(
     transcribe_ms = verify_ms = 0.0
     outcome_dpi = dpi
     outcome_width, outcome_height = width, height
-    outcome_route = "agentic"
-    # --- deterministic attempt (hybrid routing only) ---
-    # Try the free path first: structure-aware extraction from the PDF's
-    # own text layer. The verifier (one Cloud call) still gates it — the
-    # only stage that can compare candidate against the rendered page.
-    # Any objection → fall through to the agentic cycle unchanged.
-    if deterministic_attempt is not None:
-        deterministic_md = extract_deterministic(pdf_path, page_number)
-        if deterministic_md is not None:
-            # Native text is the exact character ground truth for the
-            # floor (better than OCR, which is itself a lossy reader).
-            floor_reference = deterministic_attempt.native_text or ocr_text
-            floor_score = recall(
-                floor_reference, deterministic_md, deps.coverage_floor_min_ocr_tokens
-            )
-            floor_reason = floor_failure(floor_score, deps.coverage_floor)
-            if floor_reason is None:
-                candidate = (
-                    f"OCR REFERENCE:\n{floor_reference}\nCANDIDATE MARKDOWN:\n{deterministic_md}"
-                )
-                start = time.perf_counter()
-                verdict_raw = await resilient(
-                    functools.partial(
-                        deps.verifier.transcribe,
-                        render_path,
-                        candidate,
-                        width,
-                        height,
-                        page_number,
-                        "",
-                        "",
-                    ),
-                    operation="verify",
-                )
-                verify_ms += (time.perf_counter() - start) * 1000.0
-                prompt_tokens += verdict_raw.prompt_tokens or 0
-                completion_tokens += verdict_raw.completion_tokens or 0
-                try:
-                    verdict = parse_verdict(verdict_raw.raw)
-                except EnvelopeError:
-                    verdict = ParsedVerdict(coverage=0, misses=("unparseable verdict",))
-                if verdict.verdict == "pass" and verdict.coverage >= deps.coverage_threshold:
-                    figures = (
-                        _figures_from_markdown(deterministic_md, page_number)
-                        if "<!--FIG:" in deterministic_md
-                        else []
-                    )
-                    await repo.checkpoint_page(
-                        session,
-                        job_id,
-                        page_number,
-                        status=PageStatus.VERIFIED,
-                        render_dpi=outcome_dpi,
-                        markdown=deterministic_md,
-                        coverage_score=verdict.coverage,
-                        retries=0,
-                        needs_review=False,
-                        omissions={
-                            "figures": figures,
-                            "furniture": {},
-                            "notes": f"routed deterministic: {deterministic_attempt.reason}",
-                            "floor_score": floor_score,
-                            "route": "deterministic",
-                        },
-                        token_usage={"prompt": prompt_tokens, "completion": completion_tokens},
-                        timings=_telemetry(
-                            render_path,
-                            outcome_width,
-                            outcome_height,
-                            "deterministic",
-                            None,
-                            ocr_ms,
-                            transcribe_ms,
-                            verify_ms,
-                            verdict.coverage,
-                        ),
-                        source_page_hash=page_source_hash(pdf_path, page_number),
-                        render_hash=file_hash(render_path),
-                        ocr_hash=text_hash(floor_reference),
-                        markdown_hash=text_hash(deterministic_md),
-                    )
-                    return PageOutcome(
-                        page_number=page_number,
-                        status=PageStatus.VERIFIED,
-                        retries_used=0,
-                        dpi_used=outcome_dpi,
-                        coverage=verdict.coverage,
-                        markdown=deterministic_md,
-                        route="deterministic",
-                    )
-                # Verifier objected: escalate to agentic, carrying the
-                # verdict misses so the agent gets a head start.
-                misses_note = (
-                    f"\n\nA deterministic extraction of this page was rejected "
-                    f"(verdict={verdict.verdict}, coverage={verdict.coverage}, "
-                    f"misses={list(verdict.misses)}). Transcribe the page yourself "
-                    f"from the image; fix those problems."
-                )
     for attempt in range(deps.max_page_retries + 1):
-        if attempt > 0 or (attempt == 0 and not ocr_text and deterministic_attempt is not None):
-            # Escalated first attempt (deterministic failed, OCR was skipped)
-            # or an agentic retry: (re-)render + OCR at the cycle DPI.
-            outcome_dpi = (
-                min(deps.max_dpi, outcome_dpi + deps.dpi_step) if attempt > 0 else outcome_dpi
-            )
+        if attempt > 0:
+            # An agentic retry: (re-)render + OCR at the next DPI step.
+            outcome_dpi = min(deps.max_dpi, outcome_dpi + deps.dpi_step)
             start = time.perf_counter()
             ocr_text, outcome_width, outcome_height, actual_dpi = await _render_ocr(
                 pdf_path, page_number, outcome_dpi, render_path, deps
@@ -873,7 +714,6 @@ async def _cycles(
                     },
                     "notes": env.notes,
                     "floor_score": floor_score,
-                    "route": outcome_route,
                 },
                 token_usage={"prompt": prompt_tokens, "completion": completion_tokens},
                 timings=_telemetry(
@@ -935,7 +775,6 @@ async def _cycles(
                 else "verification cap reached"
             ),
             "floor_score": best_floor,
-            "route": outcome_route,
         },
         token_usage={"prompt": prompt_tokens, "completion": completion_tokens},
         timings=_telemetry(

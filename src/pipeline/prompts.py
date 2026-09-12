@@ -1,4 +1,4 @@
-"""Versioned prompt library — A.2/A.3/A.4 templates.
+"""Versioned prompt library — A.2/A.3/A.5 templates.
 
 Pipeline stages import templates from here; prompt iteration edits ONLY this
 module (never stage code). Each template carries a version identifier that
@@ -6,7 +6,9 @@ feeds compute_pipeline_version: same inputs → same version, any
 prompt/model/config change → new job, never a silent resume mix.
 
 Fabrication note: the verification template instructs the model to report
-ADDED content under structure_issues — no schema change required.
+ADDED content under structure_issues — no schema change required. The diagram
+templates ground every reinterpretation in the figure crop and require an
+explicit non-convertible verdict rather than a guessed diagram.
 """
 
 import hashlib
@@ -14,12 +16,14 @@ import json
 
 TRANSCRIPTION_VERSION = "transcription-v2"
 VERIFICATION_VERSION = "verification-v2"
-QA_VERSION = "qa-v1"
+DIAGRAM_VERSION = "diagram-v1"
+DIAGRAM_VERIFICATION_VERSION = "diagram-verification-v1"
 
 PROMPT_VERSIONS = {
     "transcription": TRANSCRIPTION_VERSION,
     "verification": VERIFICATION_VERSION,
-    "qa": QA_VERSION,
+    "diagram": DIAGRAM_VERSION,
+    "diagram_verification": DIAGRAM_VERIFICATION_VERSION,
 }
 
 TRANSCRIPTION_TEMPLATE = """You are an expert document transcriber. Transcribe the page image to GitHub-Flavored Markdown.
@@ -62,18 +66,39 @@ Output format (markers at line start, exact, case-sensitive):
 <<<END_VERDICT>>>
 """
 
-QA_TEMPLATE = """You are a final quality editor for an assembled Markdown document transcribed from PDF pages.
-Rules (DEC-003 binds this pass: Markdown SYNTAX may be fixed; transcribed source SEMANTICS and wording must never be altered):
-- Check: heading hierarchy consistency, broken GFM constructs, leftover <!--FIG:...--> placeholders, orphaned fragments, duplicate sections from page joins.
-- Emit corrections ONLY as section-anchored find/replace patches. A patch whose "replace" alters transcribed source wording (beyond whitespace/Markdown-syntax fixes) is forbidden — omit it.
-- Every applied patch must be exactly reproducible from the summary log.
+DIAGRAM_TEMPLATE = """You are a diagram-to-Mermaid reinterpreter. You are shown ONE cropped figure region from a PDF page.
+Decide whether the figure can be faithfully re-expressed as Mermaid source, and if so produce it.
+Rules:
+- A figure is CONVERTIBLE when its structure maps to a Mermaid diagram type: flowcharts/process diagrams, sequence diagrams, class/ER diagrams, state machines, mind maps, timelines, Gantt charts, quadrants, and data charts (pie/xychart/sankey/radar).
+- A figure is NOT convertible when it is a photograph, a raster illustration/artwork, a map, a logo, a chemical/molecular structure, a complex hand-drawn schematic, or any image whose meaning depends on pixels rather than relationships. Say so honestly — a guessed diagram is worse than an honest image.
+- NEVER invent nodes, labels, numbers, or relationships that are not visible in the figure. Reinterpretation must be faithful, not plausible.
+- The grounding text is OCR/native text from inside the figure region: trust it for exact labels and numbers; if it is empty, rely only on what you can read in the image.
+- For data charts, put the extracted values in DATA so the caller can fall back to a grounded table if the Mermaid is rejected.
+- Mermaid type must be one of: flowchart, sequenceDiagram, classDiagram, stateDiagram-v2, erDiagram, gantt, mindmap, timeline, journey, pie, gitGraph, quadrantChart, xychart-beta, sankey-beta, architecture-beta, radar-beta, kanban.
+- Output ONLY the envelope. Markers at column 0, exact, case-sensitive.
+Output format:
+<<<DIAGRAM>>>
+{"convertible": true | false, "type": "<mermaid type or empty>", "confidence": 0-100, "description": "<one-sentence summary of the figure>"}
+<<<END_DIAGRAM>>>
+<<<MERMAID>>>
+[the complete Mermaid source, no ``` fences; empty when convertible is false]
+<<<END_MERMAID>>>
+<<<DATA>>>
+{"columns": ["..."], "rows": [["...", "..."]]}
+<<<END_DATA>>>
+"""
+
+DIAGRAM_VERIFY_TEMPLATE = """You are a strict Mermaid fidelity judge. Compare the candidate Mermaid source against the figure image and its grounding text.
+Rules:
+- Score COVERAGE 0-100: how faithfully the Mermaid captures the figure's structure, labels, connections, order, and values.
+- FABRICATIONS are blocking: any node, edge, label, number, or relationship in the Mermaid with no basis in the image/grounding. A high-coverage candidate with invented content must NOT pass.
+- MISSES: list visible structure the Mermaid drops or mangles (quote it).
+- A Mermaid that renders but misrepresents the figure is a failure, not a pass.
+- Output ONLY the verdict envelope: "pass" when coverage is high AND there are no fabrications AND no blocking misses, else "retry".
 Output format (markers at line start, exact, case-sensitive):
-<<<PATCHES>>>
-[{"section": "<heading or location>", "find": "<exact source text>", "replace": "<corrected text>"}]
-<<<END_PATCHES>>>
-<<<SUMMARY>>>
-[what was checked, patches applied, patches rejected with reasons]
-<<<END_SUMMARY>>>
+<<<VERDICT>>>
+{"coverage": 0-100, "misses": ["..."], "structure_issues": ["..."], "verdict": "pass" | "retry"}
+<<<END_VERDICT>>>
 """
 
 
@@ -82,17 +107,17 @@ def compute_pipeline_version(
     prompts: dict[str, str] | None = None,
     agent_model: str,
     ocr_model: str,
-    embed_model: str,
     render_dpi: int,
     rolling_context_pages: int,
     coverage_threshold: int,
     coverage_floor: float,
-    hybrid_routing: bool,
     max_page_retries: int,
     thinking_transcribe: str,
-    thinking_qa: str,
+    thinking_diagram: str,
     toc_enabled: bool,
     fig_details: bool,
+    diagram_to_mermaid: bool,
+    diagram_min_confidence: int,
 ) -> str:
     """Deterministic job fingerprint: any input change → new version."""
     canonical = json.dumps(
@@ -100,17 +125,17 @@ def compute_pipeline_version(
             "prompts": prompts if prompts is not None else PROMPT_VERSIONS,
             "agent_model": agent_model,
             "ocr_model": ocr_model,
-            "embed_model": embed_model,
             "render_dpi": render_dpi,
             "rolling_context_pages": rolling_context_pages,
             "coverage_threshold": coverage_threshold,
             "coverage_floor": coverage_floor,
-            "hybrid_routing": hybrid_routing,
             "max_page_retries": max_page_retries,
             "thinking_transcribe": thinking_transcribe,
-            "thinking_qa": thinking_qa,
+            "thinking_diagram": thinking_diagram,
             "toc_enabled": toc_enabled,
             "fig_details": fig_details,
+            "diagram_to_mermaid": diagram_to_mermaid,
+            "diagram_min_confidence": diagram_min_confidence,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -119,9 +144,11 @@ def compute_pipeline_version(
 
 
 __all__ = [
+    "DIAGRAM_TEMPLATE",
+    "DIAGRAM_VERIFICATION_VERSION",
+    "DIAGRAM_VERIFY_TEMPLATE",
+    "DIAGRAM_VERSION",
     "PROMPT_VERSIONS",
-    "QA_TEMPLATE",
-    "QA_VERSION",
     "TRANSCRIPTION_TEMPLATE",
     "TRANSCRIPTION_VERSION",
     "VERIFICATION_TEMPLATE",

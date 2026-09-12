@@ -12,19 +12,18 @@ dependencies = [
   "fastapi",
   "uvicorn",
   "starlette",
+  "websockets",
   "httpx",
   "python-multipart",
   "pydantic",
   "pydantic-settings",
   "python-dotenv",
   "pymupdf",
-  "pymupdf4llm",
-  "pillow>=11.0.0",
+  "pillow",
   "ollama",
-  "sqlalchemy>=2",
+  "sqlalchemy",
   "alembic",
   "asyncpg",
-  "chromadb",
   "pymarkdownlnt",
   "mdformat",
   "mdformat-gfm",
@@ -34,8 +33,8 @@ dependencies = [
 dev = [
   "pytest",
   "pytest-asyncio",
-  "ruff>=0.16.7",
-  "mypy>=2.3.1",
+  "ruff",
+  "mypy",
 ]
 
 [tool.setuptools.packages.find]
@@ -64,7 +63,7 @@ strict = true
 # PyMuPDF is a partially-typed C extension: untyped-call noise is the
 # library's, not ours. Our own annotations stay strict.
 [[tool.mypy.overrides]]
-module = ["src.pdf", "src.render_slice", "src.pipeline.routing", "src.pipeline.hashes", "src.pipeline.visual", "src.pipeline.pages"]
+module = ["src.pdf", "src.pipeline.hashes", "src.pipeline.pages"]
 disable_error_code = "no-untyped-call"
 
 [tool.pytest.ini_options]
@@ -73,6 +72,6 @@ asyncio_mode = "auto"
 addopts = "-m 'not live'"
 markers = [
   "unit: no network/DB/Ollama",
-  "integration: real Postgres/Chroma/local Ollama, cloud mocked",
+  "integration: real Postgres/local Ollama, cloud mocked",
   "live: real GLM-OCR + Cloud (never in default runs; burns quota)",
 ]

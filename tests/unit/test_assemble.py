@@ -69,3 +69,11 @@ def test_dedup_keeps_rare_lines() -> None:
     result = dedup_furniture(pages, _same)
     assert result.removed == []
     assert result.pages == pages
+
+
+def test_dedup_single_page_never_strips_content() -> None:
+    """A one-page doc: every line recurs 1/1 — none of it is running furniture."""
+    pages = ["# Only Page\nbody text\nfooter"]
+    result = dedup_furniture(pages, _same)
+    assert result.removed == []
+    assert result.pages == pages

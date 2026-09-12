@@ -1,6 +1,5 @@
 # --- Secrets & local state (never commit) ---
 .env
-chroma/
 output/
 *workspace*/
 *workspaces*/

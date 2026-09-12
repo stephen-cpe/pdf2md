@@ -7,7 +7,11 @@
     assets/ (FR-IMG-2 names) + recorded in the images table.
 5.2 caption: ![alt<=125](assets/…) + verbatim italic caption (FR-IMG-3).
 5.3 details: config-gated <details> long description (FR-IMG-4, default on).
-5.4 integrity: link↔file bijection + no leftover placeholders (FR-IMG-6,
+5.4 diagram: a figure may carry a verified Mermaid reinterpretation; the
+    placeholder is then replaced by a ```mermaid block (original image kept
+    in a collapsible <details> when configured). Data charts fall back to a
+    grounded GFM table + image. Non-convertible figures keep the image.
+5.5 integrity: link↔file bijection + no leftover placeholders (FR-IMG-6,
     FR-QA-3 hard-fail input). Unresolvable placeholders are LEFT in place
     so QA fails loudly — never silently dropped (FR-AGT-3).
 """
@@ -29,6 +33,7 @@ from src.pdf import (
     extract_native_images,
     render_filename,
 )
+from src.pipeline.diagrams import DiagramResult
 
 # Two accepted token shapes: the SRS form <!--FIG:page:INDEX:x0,y0,x1,y1-->
 # (what the prompt specifies; INDEX is 1,2,3... — never the literal "idx")
@@ -81,6 +86,7 @@ class FigurePayload:
     bbox: tuple[float, float, float, float]
     alt: str
     caption: str | None = None
+    diagram: DiagramResult | None = None
 
 
 @dataclass
@@ -268,8 +274,31 @@ def cap_native_pixels(data: bytes, ext: str) -> tuple[str, bytes]:
         return ext, data
 
 
-def figure_block(filename: str, alt: str, caption: str | None, fig_details: bool) -> str:
-    """Image link + verbatim caption + optional long description (5.2/5.3)."""
+def figure_block(
+    filename: str,
+    alt: str,
+    caption: str | None,
+    fig_details: bool,
+    *,
+    diagram: DiagramResult | None = None,
+    representation: str = "image",
+    keep_image: bool = True,
+) -> str:
+    """Figure representation (5.2/5.3/5.4).
+
+    ``mermaid``: ```mermaid block (+ optional collapsible original image).
+    ``table``:  grounded data table + image + alt/caption.
+    ``image``:  image link + caption + optional long description.
+    """
+    image_md = _image_block(filename, alt, caption, fig_details)
+    if representation == "mermaid" and diagram is not None and diagram.mermaid:
+        return _mermaid_block(diagram, image_md, keep_image)
+    if representation == "table" and diagram is not None and diagram.data is not None:
+        return _table_block(diagram, image_md)
+    return image_md
+
+
+def _image_block(filename: str, alt: str, caption: str | None, fig_details: bool) -> str:
     short = shorten_alt(alt)
     parts = [f"![{short}](assets/{filename})"]
     if caption:
@@ -280,6 +309,28 @@ def figure_block(filename: str, alt: str, caption: str | None, fig_details: bool
             + " ".join(alt.split())
             + "\n</details>"
         )
+    return "\n\n".join(parts)
+
+
+def _mermaid_block(diagram: DiagramResult, image_md: str, keep_image: bool) -> str:
+    """Mermaid primary; original image kept collapsibly as a safety net."""
+    parts = [f"```mermaid\n{diagram.mermaid}\n```"]
+    if diagram.description:
+        parts.append(f"*{diagram.description}*")
+    if keep_image:
+        parts.append(
+            "<details>\n<summary>Original figure</summary>\n\n" + image_md + "\n</details>"
+        )
+    return "\n\n".join(parts)
+
+
+def _table_block(diagram: DiagramResult, image_md: str) -> str:
+    """Grounded data table primary; image retained beneath (no fabricated values)."""
+    table = diagram.data.to_markdown_table() if diagram.data is not None else ""
+    parts = [table] if table else []
+    if diagram.description:
+        parts.append(f"*{diagram.description}*")
+    parts.append(image_md)
     return "\n\n".join(parts)
 
 
@@ -295,21 +346,31 @@ async def _save_figure(
     blob: tuple[str, bytes] | None,
     render_path: Path,
     assets_dir: Path,
+    diagram: DiagramResult | None = None,
+    representation: str = "image",
+    write_asset: bool = True,
 ) -> tuple[str, ImageSource] | None:
-    """Extract (native bytes or render crop) + record row. None when impossible."""
+    """Extract (native bytes or render crop) + record row. None when impossible.
+
+    ``write_asset=False`` (Mermaid accepted with ``DIAGRAM_KEEP_IMAGE=false``)
+    records the figure's conversion provenance without writing an asset file,
+    so the integrity bijection stays valid (no unreferenced file).
+    """
     filename: str | None = None
     source = ImageSource.CROP
     try:
         if blob is not None:
             ext, data = cap_native_pixels(blob[1], blob[0])
             filename = asset_name(page_number, index, ext)
-            (assets_dir / filename).write_bytes(data)
+            if write_asset:
+                (assets_dir / filename).write_bytes(data)
             source = ImageSource.NATIVE
         else:
             x0, y0, x1, y1 = (round(v) for v in bbox)
             data = crop_from_render(render_path, (x0, y0, x1, y1))
             filename = asset_name(page_number, index, "png")
-            (assets_dir / filename).write_bytes(data)
+            if write_asset:
+                (assets_dir / filename).write_bytes(data)
     except ValueError, OSError:
         return None
     assert filename is not None
@@ -317,11 +378,15 @@ async def _save_figure(
         session,
         job_id=job_id,
         page_number=page_number,
-        asset_path=f"assets/{filename}",
+        asset_path=f"assets/{filename}" if write_asset else "",
         source=source,
         bbox={"bbox": list(bbox)},
         alt_text=shorten_alt(alt),
         caption=caption,
+        mermaid=diagram.mermaid if diagram is not None and diagram.mermaid else None,
+        diagram_type=diagram.diagram_type if diagram is not None else None,
+        conversion_status=representation,
+        confidence=diagram.confidence if diagram is not None else None,
     )
     return filename, source
 
@@ -337,8 +402,10 @@ async def resolve_page_figures(
     renders_dir: Path,
     assets_dir: Path,
     fig_details: bool = True,
+    fallback: str = "both",
+    keep_image: bool = True,
 ) -> ResolveResult:
-    """Resolve one page's placeholders → asset links; records images rows.
+    """Resolve one page's placeholders → representation; records images rows.
 
     Native objects back a placeholder only when their placed geometry
     matches the agent box (overlap + comparable size); otherwise the
@@ -347,7 +414,7 @@ async def resolve_page_figures(
     flagged figure. Token page numbers are NOT trusted for matching
     (agents misnumber them): placement follows WHERE the token sits,
     so every token in the passed markdown resolves against this page. Token
-    failures leave the token for QA (5.4). Payload entries with NO matching
+    failures leave the token for QA (5.5). Payload entries with NO matching
     token (agent described a figure it never anchored) are APPENDED at page
     end — never silently dropped (NFR-1) — and reported in
     ResolveResult.orphaned for the report. Flushes rows; caller commits.
@@ -373,6 +440,11 @@ async def resolve_page_figures(
         payload = payload_by_index.get(ref.index)
         alt = payload.alt if payload is not None else f"Figure on page {page_number}"
         caption = payload.caption if payload is not None else None
+        diagram = payload.diagram if payload is not None else None
+        representation = _representation(diagram, fallback)
+        # A converted Mermaid with the image intentionally dropped must not
+        # leave an unreferenced asset behind (integrity bijection).
+        write_asset = not (representation == "mermaid" and not keep_image)
         blob = None
         if payload is not None:
             matched_indexes.add(ref.index)
@@ -390,11 +462,26 @@ async def resolve_page_figures(
             blob=blob,
             render_path=renders_dir / render_filename(page_number),
             assets_dir=assets_dir,
+            diagram=diagram,
+            representation=representation,
+            write_asset=write_asset,
         )
         if saved is None:
-            continue  # leave token: integrity check fails it loudly (5.4)
+            continue  # leave token: integrity check fails it loudly (5.5)
         filename, _ = saved
-        updated = updated.replace(ref.token, figure_block(filename, alt, caption, fig_details), 1)
+        updated = updated.replace(
+            ref.token,
+            figure_block(
+                filename,
+                alt,
+                caption,
+                fig_details,
+                diagram=diagram,
+                representation=representation,
+                keep_image=keep_image,
+            ),
+            1,
+        )
         resolved += 1
     for index, payload in payload_by_index.items():
         if index in matched_indexes:
@@ -413,21 +500,40 @@ async def resolve_page_figures(
             )
             continue
         filename = asset_name(page_number, index, "png")
-        (assets_dir / filename).write_bytes(data)
+        representation = _representation(payload.diagram, fallback)
+        write_asset = not (representation == "mermaid" and not keep_image)
+        if write_asset:
+            (assets_dir / filename).write_bytes(data)
         await repo.record_image(
             session,
             job_id=job_id,
             page_number=page_number,
-            asset_path=f"assets/{filename}",
+            asset_path=f"assets/{filename}" if write_asset else "",
             source=ImageSource.CROP,
             bbox={"bbox": list(payload.bbox)},
             alt_text=shorten_alt(payload.alt),
             caption=payload.caption,
+            mermaid=(
+                payload.diagram.mermaid
+                if payload.diagram is not None and payload.diagram.mermaid
+                else None
+            ),
+            diagram_type=payload.diagram.diagram_type if payload.diagram is not None else None,
+            conversion_status=representation,
+            confidence=payload.diagram.confidence if payload.diagram is not None else None,
         )
         updated = (
             updated.rstrip("\n")
             + "\n\n"
-            + figure_block(filename, payload.alt, payload.caption, fig_details)
+            + figure_block(
+                filename,
+                payload.alt,
+                payload.caption,
+                fig_details,
+                diagram=payload.diagram,
+                representation=representation,
+                keep_image=keep_image,
+            )
             + "\n"
         )
         resolved += 1
@@ -440,6 +546,20 @@ async def resolve_page_figures(
             }
         )
     return ResolveResult(markdown=updated, resolved=resolved, orphaned=orphaned)
+
+
+def _representation(diagram: DiagramResult | None, fallback: str) -> str:
+    """Tiered representation kind for one figure (see diagrams.choose_representation)."""
+    from src.pipeline.diagrams import choose_representation
+
+    if diagram is None:
+        return "image"
+    rep = choose_representation(
+        diagram,
+        fallback=fallback,  # type: ignore[arg-type]
+        image_available=True,
+    )
+    return rep.kind
 
 
 def find_fig_leftovers(markdown: str) -> list[str]:
@@ -462,7 +582,7 @@ def find_fig_leftovers(markdown: str) -> list[str]:
 
 
 def check_assets(markdown: str, assets_dir: Path) -> AssetReport:
-    """Bijection proof (5.4): links resolve, files referenced, no leftovers.
+    """Bijection proof (5.5): links resolve, files referenced, no leftovers.
 
     A missing assets dir means zero files: links (if any) report missing,
     which fails loudly instead of raising FileNotFoundError.

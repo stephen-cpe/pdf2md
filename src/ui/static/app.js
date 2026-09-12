@@ -137,6 +137,7 @@ $("start").addEventListener("click", async () => {
     coverage_threshold: parseInt($("opt_cov").value, 10),
     toc_enabled: $("opt_toc").checked,
     fig_details: $("opt_fig").checked,
+    diagram_to_mermaid: $("opt_diagram").checked,
   }));
   const resp = await fetch("/api/v1/jobs", { method: "POST", body: form });
   if (resp.status === 409) { $("upload_error").textContent = "A job is already running — wait for it to finish."; return; }

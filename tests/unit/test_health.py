@@ -8,7 +8,6 @@ import pytest
 from src import health
 from src.health import (
     HealthResult,
-    check_chroma,
     check_disk,
     check_local_models,
     check_ollama_cloud,
@@ -53,21 +52,21 @@ def test_local_models_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         health, "_http_get_json", lambda *a, **k: {"models": [{"name": "glm-ocr"}, {"name": "q"}]}
     )
-    assert check_local_models("http://x", "glm-ocr", "q").ok
+    assert check_local_models("http://x", "glm-ocr").ok
 
 
 def test_local_models_bare_name_matches_latest_tag(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         health,
         "_http_get_json",
-        lambda *a, **k: {"models": [{"name": "glm-ocr:latest"}, {"name": "qwen3-embedding:0.6b"}]},
+        lambda *a, **k: {"models": [{"name": "glm-ocr:latest"}]},
     )
-    assert check_local_models("http://x", "glm-ocr", "qwen3-embedding:0.6b").ok
+    assert check_local_models("http://x", "glm-ocr").ok
 
 
 def test_local_models_missing_names_pull(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(health, "_http_get_json", lambda *a, **k: {"models": []})
-    result = check_local_models("http://x", "glm-ocr", "q")
+    result = check_local_models("http://x", "glm-ocr")
     assert not result.ok
     assert "ollama pull glm-ocr" in result.message
 
@@ -77,7 +76,7 @@ def test_local_models_tags_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
         raise httpx.ConnectError("down")
 
     monkeypatch.setattr(health, "_http_get_json", _boom)
-    assert not check_local_models("http://x", "glm-ocr", "q").ok
+    assert not check_local_models("http://x", "glm-ocr").ok
 
 
 # --- cloud ---
@@ -146,18 +145,7 @@ def test_postgres_fail_hides_password(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "localhost" in result.message
 
 
-# --- chroma / disk ---
-
-
-def test_chroma_ok_and_fail(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(health, "_chroma_heartbeat", lambda *a, **k: 1)
-    assert check_chroma("./chroma").ok
-
-    def _boom(*a, **k):
-        raise RuntimeError("locked")
-
-    monkeypatch.setattr(health, "_chroma_heartbeat", _boom)
-    assert not check_chroma("./chroma").ok
+# --- disk ---
 
 
 def test_disk_ok_and_full(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
@@ -176,11 +164,8 @@ def test_disk_ok_and_full(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
 def test_run_all_composes(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     import shutil
 
-    monkeypatch.setattr(
-        health, "_http_get_json", _tags(["glm-ocr", "qwen3-embedding:0.6b", "glm-5.3-flash"])
-    )
+    monkeypatch.setattr(health, "_http_get_json", _tags(["glm-ocr", "glm-5.3-flash"]))
     monkeypatch.setattr(health, "_pg_select_1", lambda *a, **k: None)
-    monkeypatch.setattr(health, "_chroma_heartbeat", lambda *a, **k: 1)
     monkeypatch.setattr(shutil, "disk_usage", lambda p: _DiskUsage(10 * GB, 1 * GB, 9 * GB))
 
     from src.config import Settings
@@ -196,7 +181,6 @@ def test_run_all_composes(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
         "local_models",
         "ollama_cloud",
         "postgres",
-        "chroma",
         "disk",
     ]
     assert all(r.ok for r in results)
@@ -206,15 +190,12 @@ def test_degraded_when_postgres_down(monkeypatch: pytest.MonkeyPatch, tmp_path) 
     """§8 degraded mode: PG down degrades health, never crashes it, leaks nothing."""
     import shutil
 
-    monkeypatch.setattr(
-        health, "_http_get_json", _tags(["glm-ocr", "qwen3-embedding:0.6b", "glm-5.3-flash"])
-    )
+    monkeypatch.setattr(health, "_http_get_json", _tags(["glm-ocr", "glm-5.3-flash"]))
 
     def _pg_down(*a, **k):
         raise ConnectionRefusedError("pg down")
 
     monkeypatch.setattr(health, "_pg_select_1", _pg_down)
-    monkeypatch.setattr(health, "_chroma_heartbeat", lambda *a, **k: 1)
     monkeypatch.setattr(shutil, "disk_usage", lambda p: _DiskUsage(10 * GB, 1 * GB, 9 * GB))
 
     from src.config import Settings

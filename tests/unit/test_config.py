@@ -32,11 +32,9 @@ def test_defaults_match_appendix_b(monkeypatch: pytest.MonkeyPatch, tmp_path) ->
     assert s.OLLAMA_CLOUD_URL == "https://ollama.com"
     assert s.AGENT_MODEL == "glm-5.3-flash"
     assert s.OCR_MODEL == "glm-ocr"
-    assert s.EMBED_MODEL == "qwen3-embedding:0.6b"
     assert s.AGENT_TIMEOUT_SECONDS == 300
     assert s.OCR_TIMEOUT_SECONDS == 120
     assert s.AGENT_MAX_OUTPUT_TOKENS is None
-    assert s.CHROMA_PATH == "./chroma"
     assert s.KEEP_WORKSPACE_ON_SUCCESS is False
     assert s.MAX_CLEANUP_RETRIES == 3
     assert s.BIND_HOST == "127.0.0.1"
@@ -49,11 +47,18 @@ def test_defaults_match_appendix_b(monkeypatch: pytest.MonkeyPatch, tmp_path) ->
     assert s.MAX_PAGE_RETRIES == 2
     assert s.MAX_PDF_MB == 500
     assert s.MAX_PDF_PAGES == 1000
-    assert s.HYBRID_ROUTING is False
     assert s.THINKING_EFFORT_TRANSCRIBE == "low"
-    assert s.THINKING_EFFORT_QA == "high"
+    assert s.THINKING_EFFORT_DIAGRAM == "high"
     assert s.TOC_ENABLED is True
     assert s.FIG_DETAILS_BLOCKS is True
+    # Diagram -> Mermaid primary capability.
+    assert s.DIAGRAM_TO_MERMAID is True
+    assert s.DIAGRAM_MIN_CONFIDENCE == 80
+    assert s.DIAGRAM_VERIFY is True
+    assert s.DIAGRAM_FALLBACK == "both"
+    assert "flowchart" in s.allowed_diagram_types()
+    assert "sequenceDiagram" in s.allowed_diagram_types()
+    assert "xychart-beta" in s.allowed_diagram_types()
 
 
 def test_missing_api_key_fails_clear(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
@@ -95,7 +100,9 @@ def test_secrets_never_in_repr_or_str(monkeypatch: pytest.MonkeyPatch, tmp_path)
         ("MAX_PAGE_RETRIES", "-1"),
         ("AGENT_TIMEOUT_SECONDS", "0"),
         ("THINKING_EFFORT_TRANSCRIBE", "ultra"),
-        ("THINKING_EFFORT_QA", "medium"),
+        ("THINKING_EFFORT_DIAGRAM", "medium"),
+        ("DIAGRAM_MIN_CONFIDENCE", "101"),
+        ("DIAGRAM_FALLBACK", "nonsense"),
     ],
 )
 def test_invalid_values_rejected(

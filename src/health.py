@@ -3,9 +3,9 @@
 Each check returns ok/fail + an actionable message (FR-UI-6, §5.1 GET /health
 contract foundation — the REST endpoint reuses run_all).
 
-Test seams: the three _raw helpers isolate all I/O (HTTP, Postgres, Chroma)
-so unit tests mock them without network/DB. Messages NEVER contain secrets —
-Postgres errors show host/db only, never the DSN password.
+Test seams: the raw helpers isolate all I/O (HTTP, Postgres) so unit tests
+mock them without network/DB. Messages NEVER contain secrets — Postgres
+errors show host/db only, never the DSN password.
 """
 
 import asyncio
@@ -58,13 +58,6 @@ def _pg_select_1(dsn: str, timeout: float) -> None:
     asyncio.run(_ping())
 
 
-def _chroma_heartbeat(path: str) -> int:
-    """Embedded ChromaDB heartbeat. Returns nanosecond heartbeat."""
-    import chromadb
-
-    return int(chromadb.PersistentClient(path=path).heartbeat())
-
-
 # --- Checks ---
 
 
@@ -97,9 +90,7 @@ def _resolved(wanted: str, names: list[str]) -> bool:
     return wanted in names or _canonical(wanted) in canon
 
 
-def check_local_models(
-    base_url: str, ocr_model: str, embed_model: str, timeout: float = 10.0
-) -> HealthResult:
+def check_local_models(base_url: str, ocr_model: str, timeout: float = 10.0) -> HealthResult:
     """Required local models pulled?"""
     try:
         names = _model_names(_http_get_json(f"{base_url}/api/tags", {}, timeout))
@@ -109,13 +100,13 @@ def check_local_models(
             False,
             f"Could not list local models at {base_url}: {exc}. Is the Ollama daemon running?",
         )
-    missing = [m for m in (ocr_model, embed_model) if not _resolved(m, names)]
+    missing = [m for m in (ocr_model,) if not _resolved(m, names)]
     if missing:
         pulls = "  ".join(f"ollama pull {m}" for m in missing)
         return HealthResult(
             "local_models", False, f"Local model(s) missing: {missing}. Run: {pulls}"
         )
-    return HealthResult("local_models", True, f"Local models present: {ocr_model}, {embed_model}.")
+    return HealthResult("local_models", True, f"Local models present: {ocr_model}.")
 
 
 def normalize_agent_model(model: str) -> str:
@@ -184,15 +175,6 @@ def check_postgres(dsn: str, timeout: float = 10.0) -> HealthResult:
     return HealthResult("postgres", True, f"PostgreSQL responding at {label}.")
 
 
-def check_chroma(path: str) -> HealthResult:
-    """Embedded ChromaDB opens at CHROMA_PATH?"""
-    try:
-        _chroma_heartbeat(path)
-    except Exception as exc:
-        return HealthResult("chroma", False, f"ChromaDB failed at {path}: {exc}.")
-    return HealthResult("chroma", True, f"ChromaDB healthy at {path}.")
-
-
 def check_disk(path: str, min_free_bytes: int = DEFAULT_MIN_FREE_BYTES) -> HealthResult:
     """Enough free space where outputs/workspaces land?"""
     target = Path(path).resolve()
@@ -214,17 +196,15 @@ def run_all(settings: Settings) -> list[HealthResult]:
     db = settings.DATABASE_URL.get_secret_value()
     return [
         check_ollama_local(settings.OLLAMA_LOCAL_URL),
-        check_local_models(settings.OLLAMA_LOCAL_URL, settings.OCR_MODEL, settings.EMBED_MODEL),
+        check_local_models(settings.OLLAMA_LOCAL_URL, settings.OCR_MODEL),
         check_ollama_cloud(settings.OLLAMA_CLOUD_URL, key, settings.AGENT_MODEL),
         check_postgres(db),
-        check_chroma(settings.CHROMA_PATH),
         check_disk("."),
     ]
 
 
 __all__ = [
     "HealthResult",
-    "check_chroma",
     "check_disk",
     "check_local_models",
     "check_ollama_cloud",

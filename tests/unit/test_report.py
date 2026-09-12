@@ -1,7 +1,7 @@
-"""Unit tier: report fields, writer layout, section splitting."""
+"""Unit tier: report fields, writer layout."""
 
 from src.db.models import Job, JobStatus, Page, PageStatus
-from src.pipeline.report import build_report, split_sections, write_output
+from src.pipeline.report import build_report, write_output
 
 
 def _job() -> Job:
@@ -14,7 +14,6 @@ def _job() -> Job:
         options={
             "agent_model": "glm-5.3-flash",
             "ocr_model": "glm-ocr",
-            "embed_model": "qwen3-embedding:0.6b",
             "render_dpi": 200,
         },
     )
@@ -57,8 +56,6 @@ def test_report_has_every_ac7_field() -> None:
         pipeline_version="abc123",
         prompt_versions={"transcription": "transcription-v1"},
         furniture_removed=[],
-        qa_applied=1,
-        qa_rejected=0,
         lint_warnings=["MD001:1:heading"],
     )
     for token in (
@@ -75,8 +72,46 @@ def test_report_has_every_ac7_field() -> None:
         "transcribe_ms",
         "s/r/o/m",
         "MD001",
+        "Diagram → Mermaid conversion",
     ):
         assert token in report, token
+
+
+def test_report_conversion_summary() -> None:
+    from src.db.models import Image, ImageSource
+
+    job = _job()
+    images = [
+        Image(
+            job_id="00000000-0000-0000-0000-000000000000",
+            page_number=1,
+            asset_path="assets/a.png",
+            source=ImageSource.CROP,
+            mermaid="flowchart TD\n  A --> B",
+            diagram_type="flowchart",
+            conversion_status="mermaid",
+            confidence=90,
+        ),
+        Image(
+            job_id="00000000-0000-0000-0000-000000000000",
+            page_number=2,
+            asset_path="assets/b.png",
+            source=ImageSource.CROP,
+            conversion_status="image",
+        ),
+    ]
+    report = build_report(
+        job,
+        [_page(1), _page(2)],
+        pipeline_version="v",
+        prompt_versions={},
+        furniture_removed=[],
+        lint_warnings=[],
+        images=images,
+    )
+    assert "converted to Mermaid: 1 (50%)" in report
+    assert "image fallbacks: 1" in report
+    assert "| 1 |" in report and "flowchart" in report
 
 
 def test_write_output_layout(tmp_path) -> None:
@@ -181,28 +216,3 @@ def test_write_output_rejects_unsafe_docname(tmp_path) -> None:
     for bad in ("", ".", "..", "a/b", "a\\b", "../evil"):
         with _pytest.raises(ValueError):
             _write(tmp_path / "out", bad, "# x\n", src, "# r\n")
-
-
-def test_split_sections() -> None:
-    sections = split_sections("# A\n\ntext a\n\n## B\n\ntext b\n")
-    assert [heading for heading, _ in sections] == ["A", "B"]
-    assert "text b" in sections[1][1]
-    assert split_sections("") == []
-
-
-def test_persist_document_embeddings_uses_tmp_chroma(tmp_path) -> None:
-    from src.chroma import ChromaStore
-    from src.pipeline.report import persist_document_embeddings
-
-    store = ChromaStore(
-        str(tmp_path / "chroma"),
-        "fake",
-        embed_fn=lambda texts: [[1.0, 0.0] if "text a" in t else [0.0, 1.0] for t in texts],
-    )
-    count = persist_document_embeddings(store, "doc", "# A\n\ntext a\n\n# B\n\ntext b\n")
-    # one child chunk per section (heading included, small sections merge)
-    assert count == 2
-    result = store.query("documents", "text a", n_results=1)
-    assert result["ids"][0][0].startswith("doc:")
-    metas = result.get("metadatas", [[]])[0]
-    assert metas and "A" in metas[0]["heading"] and metas[0]["parent_id"].startswith("doc:")

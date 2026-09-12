@@ -28,10 +28,10 @@ jobs:
           pip install -e . --no-deps
 
       - name: Ruff format check
-        run: python -m ruff format --check src tests eval
+        run: python -m ruff format --check src tests
 
       - name: Ruff lint
-        run: python -m ruff check src tests eval
+        run: python -m ruff check src tests
 
       - name: Mypy (strict)
         run: python -m mypy src

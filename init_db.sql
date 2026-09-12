@@ -4,7 +4,7 @@
 --
 --   psql -U postgres -h localhost -d pdf2md -f init_db.sql
 --   venv\Scripts\python -m alembic upgrade head
---   venv\Scripts\python -m alembic current   (must print "a73cb35dc5f1 (head)")
+--   venv\Scripts\python -m alembic current   (must print "b84dc46ed6a2 (head)")
 --
 -- Drops ALL conversion data (jobs, pages, images, events) plus the native
 -- PG enum types (which plain table drops leave orphaned and which break a

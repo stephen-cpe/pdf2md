@@ -1,14 +1,15 @@
 """Textual-envelope parser — deterministic extraction + validation.
 
-SRS Appendix A.2/A.3: Ollama Cloud has no structured outputs, so this parser
-IS the contract enforcement. Rules, all strict on purpose (a silent
+SRS Appendix A.2/A.3/A.5: Ollama Cloud has no structured outputs, so this
+parser IS the contract enforcement. Rules, all strict on purpose (a silent
 mis-parse corrupts the pipeline worse than a loud retry):
 - Section markers match at column 0, exact, case-sensitive. Indented or
   mid-line lookalikes are CONTENT, never markers (A.2 "line-start" rule).
 - Every required section must open once and close once; duplicates, stray
   ends, truncation, and missing sections are EnvelopeError.
-- FIGURES/FURNITURE/VERDICT payloads are JSON validated AFTER extraction,
-  so one unescaped quote in Markdown can never invalidate the response.
+- FIGURES/FURNITURE/VERDICT/DIAGRAM payloads are JSON validated AFTER
+  extraction, so one unescaped quote in Markdown can never invalidate the
+  response.
 
 Malformed input never discards data: EnvelopeError carries the verbatim raw
 response (caller preserves it + flags needs_review after the retry cap) and
@@ -23,7 +24,7 @@ MAX_ENVELOPE_ATTEMPTS = 2
 
 TRANSCRIPTION_SECTIONS = ("MARKDOWN", "FIGURES", "FURNITURE", "NOTES")
 VERDICT_SECTIONS = ("VERDICT",)
-QA_SECTIONS = ("PATCHES", "SUMMARY")
+DIAGRAM_SECTIONS = ("DIAGRAM", "MERMAID", "DATA")
 
 
 def _open(tag: str) -> str:
@@ -83,20 +84,23 @@ class ParsedVerdict:
 
 
 @dataclass(frozen=True)
-class Patch:
-    """One section-anchored find/replace operation (A.4)."""
+class DiagramDataPayload:
+    """Data-chart payload for the table fallback (A.5)."""
 
-    section: str
-    find: str
-    replace: str
+    columns: tuple[str, ...] = ()
+    rows: tuple[tuple[str, ...], ...] = ()
 
 
 @dataclass(frozen=True)
-class ParsedQa:
-    """Validated whole-document QA response (A.4)."""
+class ParsedDiagram:
+    """Validated diagram→Mermaid response (A.5)."""
 
-    patches: tuple[Patch, ...] = ()
-    summary: str = ""
+    convertible: bool = False
+    mermaid: str = ""
+    diagram_type: str = ""
+    confidence: int = 0
+    description: str = ""
+    data: DiagramDataPayload | None = None
 
 
 def _extract_sections(raw: str, required: tuple[str, ...]) -> dict[str, str]:
@@ -228,26 +232,58 @@ def parse_verdict(raw: str) -> ParsedVerdict:
     )
 
 
-def parse_qa(raw: str) -> ParsedQa:
-    """Parse + validate a whole-document QA response (A.4)."""
-    sections = _extract_sections(raw, QA_SECTIONS)
-    payload = _payload_json("PATCHES", sections["PATCHES"], raw)
-    if not isinstance(payload, list):
-        raise EnvelopeError("PATCHES payload must be a JSON array", raw)
-    patches: list[Patch] = []
-    for pos, item in enumerate(payload):
-        if not isinstance(item, dict):
-            raise EnvelopeError(f"PATCHES[{pos}] must be an object", raw)
-        try:
-            section, find, replace = item["section"], item["find"], item["replace"]
-        except KeyError as exc:
-            raise EnvelopeError(f"PATCHES[{pos}] missing key {exc}", raw) from exc
-        if not all(isinstance(v, str) for v in (section, find, replace)) or not find:
-            raise EnvelopeError(
-                f"PATCHES[{pos}] needs string section/find/replace with non-empty find", raw
-            )
-        patches.append(Patch(section=section, find=find, replace=replace))
-    return ParsedQa(patches=tuple(patches), summary=sections["SUMMARY"])
+def _parse_diagram_data(text: str, raw: str) -> DiagramDataPayload | None:
+    if not text:
+        return None
+    payload = _payload_json("DATA", text, raw)
+    if payload in ({}, None):
+        return None
+    if not isinstance(payload, dict):
+        raise EnvelopeError("DATA payload must be a JSON object", raw)
+    columns = payload.get("columns", [])
+    rows = payload.get("rows", [])
+    if not isinstance(columns, list) or not all(isinstance(c, str) for c in columns):
+        raise EnvelopeError("DATA.columns must be a string array", raw)
+    if not isinstance(rows, list) or not all(
+        isinstance(r, list) and all(isinstance(cell, str) for cell in r) for r in rows
+    ):
+        raise EnvelopeError("DATA.rows must be an array of string arrays", raw)
+    return DiagramDataPayload(
+        columns=tuple(columns),
+        rows=tuple(tuple(r) for r in rows),
+    )
+
+
+def parse_diagram(raw: str) -> ParsedDiagram:
+    """Parse + validate a diagram→Mermaid response (A.5)."""
+    sections = _extract_sections(raw, DIAGRAM_SECTIONS)
+    payload = _payload_json("DIAGRAM", sections["DIAGRAM"], raw)
+    if not isinstance(payload, dict):
+        raise EnvelopeError("DIAGRAM payload must be a JSON object", raw)
+    convertible = payload.get("convertible")
+    if not isinstance(convertible, bool):
+        raise EnvelopeError("DIAGRAM.convertible must be a boolean", raw)
+    diagram_type = payload.get("type", "")
+    if not isinstance(diagram_type, str):
+        raise EnvelopeError("DIAGRAM.type must be a string", raw)
+    confidence = payload.get("confidence", 0)
+    if (
+        isinstance(confidence, bool)
+        or not isinstance(confidence, int)
+        or not 0 <= confidence <= 100
+    ):
+        raise EnvelopeError("DIAGRAM.confidence must be an integer 0-100", raw)
+    description = payload.get("description", "")
+    if not isinstance(description, str):
+        raise EnvelopeError("DIAGRAM.description must be a string", raw)
+    return ParsedDiagram(
+        convertible=convertible,
+        mermaid=sections["MERMAID"],
+        diagram_type=diagram_type,
+        confidence=confidence,
+        description=description,
+        data=_parse_diagram_data(sections["DATA"], raw),
+    )
 
 
 def corrective_prompt(
@@ -264,18 +300,19 @@ def corrective_prompt(
 
 
 __all__ = [
+    "DIAGRAM_SECTIONS",
     "MAX_ENVELOPE_ATTEMPTS",
     "TRANSCRIPTION_SECTIONS",
     "VERDICT_SECTIONS",
+    "DiagramDataPayload",
     "EnvelopeError",
     "Figure",
     "Furniture",
+    "ParsedDiagram",
     "ParsedEnvelope",
-    "ParsedQa",
     "ParsedVerdict",
-    "Patch",
     "corrective_prompt",
-    "parse_qa",
+    "parse_diagram",
     "parse_transcription",
     "parse_verdict",
 ]

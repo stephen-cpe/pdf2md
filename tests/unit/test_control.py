@@ -16,7 +16,6 @@ def test_happy_chain_to_completed() -> None:
         JobStatus.OCR,
         JobStatus.TRANSCRIBING,
         JobStatus.ASSEMBLING,
-        JobStatus.QA,
         JobStatus.COMPLETED,
     ):
         control.transition(target)

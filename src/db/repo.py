@@ -164,6 +164,10 @@ async def record_image(
     alt_text: str | None = None,
     caption: str | None = None,
     referenced: bool = True,
+    mermaid: str | None = None,
+    diagram_type: str | None = None,
+    conversion_status: str | None = None,
+    confidence: int | None = None,
 ) -> Image:
     """Record one extracted figure asset; caller commits via checkpoint flow."""
     image = Image(
@@ -175,6 +179,10 @@ async def record_image(
         alt_text=alt_text,
         caption=caption,
         referenced=referenced,
+        mermaid=mermaid,
+        diagram_type=diagram_type,
+        conversion_status=conversion_status,
+        confidence=confidence,
     )
     session.add(image)
     await session.flush()

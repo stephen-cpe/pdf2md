@@ -6,8 +6,9 @@ import pytest
 
 from src.pipeline import agent as agent_mod
 from src.pipeline.prompts import (
+    DIAGRAM_TEMPLATE,
+    DIAGRAM_VERIFY_TEMPLATE,
     PROMPT_VERSIONS,
-    QA_TEMPLATE,
     TRANSCRIPTION_TEMPLATE,
     VERIFICATION_TEMPLATE,
     compute_pipeline_version,
@@ -18,20 +19,29 @@ from src.pipeline.prompts import (
 SNAPSHOTS = {
     "transcription": "1a93852306ffd420e4bfb41d811a6514696367541133f8907b21f9b00e762e5f",
     "verification": "ffce6fa4fffbce2304b63dc3991a7431c577f7107aaf9bf99b322aa884724bab",
-    "qa": "2e9926df3d6c59ffde3f83cda3f50ddf4c4fa02f32d9e3f34217f0316be53fca",
+    "diagram": "ca20568644ff8c6affec03652ea03edd5c281ea8974064289c16615e3192f324",
+    "diagram_verification": "fa2608014b2ebdae4c8a321b60462e1370a8b1b386612a774815d0042749065c",
 }
 TEMPLATES = {
     "transcription": TRANSCRIPTION_TEMPLATE,
     "verification": VERIFICATION_TEMPLATE,
-    "qa": QA_TEMPLATE,
+    "diagram": DIAGRAM_TEMPLATE,
+    "diagram_verification": DIAGRAM_VERIFY_TEMPLATE,
 }
 
 
 def test_versions_present_and_distinct() -> None:
-    assert set(PROMPT_VERSIONS) == {"transcription", "verification", "qa"}
-    assert len(set(PROMPT_VERSIONS.values())) == 3
+    assert set(PROMPT_VERSIONS) == {
+        "transcription",
+        "verification",
+        "diagram",
+        "diagram_verification",
+    }
+    assert len(set(PROMPT_VERSIONS.values())) == 4
     for version in PROMPT_VERSIONS.values():
-        assert version.startswith(("transcription-v", "verification-v", "qa-v"))
+        assert version.startswith(
+            ("transcription-v", "verification-v", "diagram-v", "diagram-verification-v")
+        )
 
 
 def test_snapshots_stable() -> None:
@@ -65,26 +75,33 @@ def test_verification_normative_clauses(clause: str) -> None:
     assert clause in VERIFICATION_TEMPLATE
 
 
-@pytest.mark.parametrize("clause", ["<<<PATCHES>>>", "never be altered", "SUMMARY"])
-def test_qa_normative_clauses(clause: str) -> None:
-    assert clause in QA_TEMPLATE
+@pytest.mark.parametrize(
+    "clause", ["<<<DIAGRAM>>>", "<<<MERMAID>>>", "<<<DATA>>>", "convertible", "NEVER invent"]
+)
+def test_diagram_normative_clauses(clause: str) -> None:
+    assert clause in DIAGRAM_TEMPLATE
+
+
+@pytest.mark.parametrize("clause", ["<<<VERDICT>>>", "FABRICATIONS", "coverage"])
+def test_diagram_verification_normative_clauses(clause: str) -> None:
+    assert clause in DIAGRAM_VERIFY_TEMPLATE
 
 
 def _base_kwargs() -> dict:
     return {
         "agent_model": "glm-5.3-flash",
         "ocr_model": "glm-ocr",
-        "embed_model": "qwen3-embedding:0.6b",
         "render_dpi": 200,
         "rolling_context_pages": 3,
         "coverage_threshold": 95,
         "coverage_floor": 0.80,
-        "hybrid_routing": False,
         "max_page_retries": 2,
         "thinking_transcribe": "low",
-        "thinking_qa": "high",
+        "thinking_diagram": "high",
         "toc_enabled": True,
         "fig_details": True,
+        "diagram_to_mermaid": True,
+        "diagram_min_confidence": 80,
     }
 
 
@@ -97,17 +114,17 @@ def test_pipeline_version_deterministic() -> None:
     [
         "agent_model",
         "ocr_model",
-        "embed_model",
         "render_dpi",
         "rolling_context_pages",
         "coverage_threshold",
         "coverage_floor",
-        "hybrid_routing",
         "max_page_retries",
         "thinking_transcribe",
-        "thinking_qa",
+        "thinking_diagram",
         "toc_enabled",
         "fig_details",
+        "diagram_to_mermaid",
+        "diagram_min_confidence",
     ],
 )
 def test_pipeline_version_sensitive_to_every_input(key: str) -> None:

@@ -1,12 +1,12 @@
 """Full-chain job driver — preflight to deliverable with progress.
 
 Composes the pipeline stages for one job: preflight → per-page loop (real
-adapters) → image resolution → dedup/assemble → Cloud QA → normalize →
-lint/integrity gate → report → deliverable → embeddings. Emits §5.2 events
-via the injected emit callable; honors pause/cancel between stages (inside
-pages via JobControl). Any PauseJob from the page loop is already persisted
-there; unexpected exceptions fail the job with the error recorded (never a
-bare traceback to the client).
+adapters) → per-figure diagram→Mermaid reinterpretation → image resolution →
+dedup/assemble → normalize → lint/integrity gate → report → deliverable.
+Emits §5.2 events via the injected emit callable; honors pause/cancel between
+stages (inside pages via JobControl). Any PauseJob from the page loop is
+already persisted there; unexpected exceptions fail the job with the error
+recorded (never a bare traceback to the client).
 """
 
 import datetime
@@ -18,30 +18,30 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from src.chroma import ChromaStore
 from src.config import Settings
 from src.db import repo
 from src.db.models import JobStatus
 from src.logging import get_logger, set_context
 from src.pdf import preflight
 from src.pipeline.agent import GlmFlashAgent
-from src.pipeline.assemble import assemble, dedup_furniture, make_chroma_similar
+from src.pipeline.assemble import assemble, dedup_furniture, make_exact_similar
 from src.pipeline.control import IllegalTransitionError, JobControl
+from src.pipeline.diagrams import DiagramResult, convert_figure
 from src.pipeline.gfm import classify, lint_markdown, normalize_markdown
 from src.pipeline.images import FigurePayload, check_assets, resolve_page_figures
 from src.pipeline.ocr import GlmOcrEngine
 from src.pipeline.pages import PageDeps, PageOutcome, RunSummary, run_pages
 from src.pipeline.prompts import (
+    DIAGRAM_TEMPLATE,
+    DIAGRAM_VERIFY_TEMPLATE,
     PROMPT_VERSIONS,
-    QA_TEMPLATE,
     VERIFICATION_TEMPLATE,
     compute_pipeline_version,
 )
-from src.pipeline.qa import run_qa_pass
 from src.pipeline.report import (
     build_report,
+    collect_job_images,
     collect_job_pages,
-    persist_document_embeddings,
     write_output,
 )
 from src.workspace import Workspace
@@ -62,9 +62,13 @@ class JobOptions:
     rolling_context_pages: int = 3
     toc_enabled: bool = True
     fig_details: bool = True
-    hybrid_routing: bool = False
     thinking_transcribe: Effort = "low"
-    thinking_qa: Effort = "high"
+    thinking_diagram: Effort = "high"
+    diagram_to_mermaid: bool = True
+    diagram_min_confidence: int = 80
+    diagram_verify: bool = True
+    diagram_fallback: str = "both"
+    diagram_keep_image: bool = True
 
     @staticmethod
     def from_settings(settings: Settings, overrides: dict[str, Any] | None = None) -> JobOptions:
@@ -77,9 +81,13 @@ class JobOptions:
             "rolling_context_pages": settings.ROLLING_CONTEXT_PAGES,
             "toc_enabled": settings.TOC_ENABLED,
             "fig_details": settings.FIG_DETAILS_BLOCKS,
-            "hybrid_routing": settings.HYBRID_ROUTING,
             "thinking_transcribe": settings.THINKING_EFFORT_TRANSCRIBE,
-            "thinking_qa": settings.THINKING_EFFORT_QA,
+            "thinking_diagram": settings.THINKING_EFFORT_DIAGRAM,
+            "diagram_to_mermaid": settings.DIAGRAM_TO_MERMAID,
+            "diagram_min_confidence": settings.DIAGRAM_MIN_CONFIDENCE,
+            "diagram_verify": settings.DIAGRAM_VERIFY,
+            "diagram_fallback": settings.DIAGRAM_FALLBACK,
+            "diagram_keep_image": settings.DIAGRAM_KEEP_IMAGE,
         }
         for key, value in (overrides or {}).items():
             if key in base and type(value) is type(base[key]):
@@ -179,7 +187,6 @@ async def run_job(
             coverage_floor=options.coverage_floor,
             max_page_retries=options.max_page_retries,
             rolling_context_pages=options.rolling_context_pages,
-            hybrid_routing=options.hybrid_routing,
         )
 
         async def _on_page(outcome: PageOutcome) -> None:
@@ -253,6 +260,7 @@ async def run_job(
         await control.wait_if_paused()
         if control.cancel_requested:
             return await _cancelled(factory, control, job_id, emit)
+        key = settings.OLLAMA_API_KEY.get_secret_value()
         async with factory() as session:
             job_row, pages = await collect_job_pages(session, job_id)
             assert job_row is not None
@@ -260,7 +268,19 @@ async def run_job(
             resolved: list[str] = []
             orphans: list[dict[str, object]] = []
             for page in sorted(pages, key=lambda p: p.page_number):
-                figs = _payloads(page.omissions)
+                figs = await _diagram_payloads(
+                    settings=settings,
+                    key=key,
+                    job_id=job_id,
+                    job_dir=job_dir,
+                    pdf_path=pdf_path,
+                    renders_dir=renders_dir,
+                    page_number=page.page_number,
+                    omissions=page.omissions,
+                    options=options,
+                    emit=emit,
+                    total=total,
+                )
                 outcome = await resolve_page_figures(
                     session,
                     job_id=job_id,
@@ -271,6 +291,8 @@ async def run_job(
                     renders_dir=renders_dir,
                     assets_dir=assets_staging,
                     fig_details=options.fig_details,
+                    fallback=options.diagram_fallback,
+                    keep_image=options.diagram_keep_image,
                 )
                 resolved.append(outcome.markdown)
                 for entry in outcome.orphaned:
@@ -287,27 +309,9 @@ async def run_job(
                     )
             await session.commit()
 
-        store = ChromaStore(
-            str(settings.CHROMA_PATH), settings.EMBED_MODEL, settings.OLLAMA_LOCAL_URL
-        )
-        dedup = dedup_furniture(resolved, make_chroma_similar(store))
+        dedup = dedup_furniture(resolved, make_exact_similar())
         assembled = assemble(dedup.pages, toc_enabled=options.toc_enabled)
-
-        await _goto(factory, control, job_id, JobStatus.QA, emit, "qa")
-        await control.wait_if_paused()
-        if control.cancel_requested:
-            return await _cancelled(factory, control, job_id, emit)
-        qa_agent = GlmFlashAgent(
-            settings.OLLAMA_CLOUD_URL,
-            key,
-            model=settings.AGENT_MODEL,
-            thinking_effort=options.thinking_qa,
-            timeout=settings.AGENT_TIMEOUT_SECONDS,
-            system_prompt=QA_TEMPLATE,
-        )
-        outline = "\n".join(h for text in dedup.pages for h in _headings(text))
-        qa = await run_qa_pass(qa_agent, assembled, outline)
-        normalized = normalize_markdown(qa.markdown)
+        normalized = normalize_markdown(assembled)
         warnings = lint_markdown(normalized)
         assets_staging.mkdir(parents=True, exist_ok=True)
         integrity = check_assets(normalized, assets_staging)
@@ -319,20 +323,21 @@ async def run_job(
         async with factory() as session:
             job_row, pages = await collect_job_pages(session, job_id)
             assert job_row is not None
+            images = await collect_job_images(session, job_id)
             pipeline_version = compute_pipeline_version(
                 agent_model=settings.AGENT_MODEL,
                 ocr_model=settings.OCR_MODEL,
-                embed_model=settings.EMBED_MODEL,
                 render_dpi=options.render_dpi,
                 rolling_context_pages=options.rolling_context_pages,
                 coverage_threshold=options.coverage_threshold,
                 coverage_floor=options.coverage_floor,
-                hybrid_routing=options.hybrid_routing,
                 max_page_retries=options.max_page_retries,
                 thinking_transcribe=options.thinking_transcribe,
-                thinking_qa=options.thinking_qa,
+                thinking_diagram=options.thinking_diagram,
                 toc_enabled=options.toc_enabled,
                 fig_details=options.fig_details,
+                diagram_to_mermaid=options.diagram_to_mermaid,
+                diagram_min_confidence=options.diagram_min_confidence,
             )
             report = build_report(
                 job_row,
@@ -340,19 +345,8 @@ async def run_job(
                 pipeline_version=pipeline_version,
                 prompt_versions=dict(PROMPT_VERSIONS),
                 furniture_removed=[dict(e) for e in dedup.removed],
-                qa_applied=len(qa.applied),
-                qa_rejected=len(qa.rejected),
-                qa_log=[
-                    {
-                        "section": p.section,
-                        "find": p.find,
-                        "replace": p.replace,
-                        "applied": p.applied,
-                        "reason": p.reason,
-                    }
-                    for p in (*qa.applied, *qa.rejected)
-                ],
                 lint_warnings=warnings,
+                images=images,
                 orphaned_figures=orphans,
             )
             if verdict.hard_fail:
@@ -369,7 +363,7 @@ async def run_job(
                 # Output unwritable / disk full (§8): pause, don't fail —
                 # resume after the operator fixes the disk.
                 async with factory() as session:
-                    await repo.set_job_status(session, job_id, JobStatus.PAUSED, "qa")
+                    await repo.set_job_status(session, job_id, JobStatus.PAUSED, "assembling")
                 try:
                     control.request_pause()
                 except IllegalTransitionError:
@@ -383,29 +377,14 @@ async def run_job(
                     }
                 )
                 return "paused"
-            try:
-                persist_document_embeddings(store, pdf_path.stem, normalized)
-            except Exception as exc:  # noqa: BLE001 - optional post-step, job continues
-                await repo.log_event(
-                    session, job_id, "warning", f"doc embeddings skipped: {exc}", stage="qa"
-                )
+            mermaid_count = sum(1 for img in images if img.conversion_status == "mermaid")
             options_snapshot = dict(job_row.options or {})
             options_snapshot["results"] = {
                 "furniture_removed": [dict(e) for e in dedup.removed],
-                "qa_applied": len(qa.applied),
-                "qa_rejected": len(qa.rejected),
-                "qa_log": [
-                    {
-                        "section": p.section,
-                        "find": p.find,
-                        "replace": p.replace,
-                        "applied": p.applied,
-                        "reason": p.reason,
-                    }
-                    for p in (*qa.applied, *qa.rejected)
-                ],
                 "lint_warnings": warnings,
                 "orphaned_figures": orphans,
+                "figures_total": len(images),
+                "figures_mermaid": mermaid_count,
                 "artifacts": {
                     "document": str(deliverable.markdown_path),
                     "report": str(deliverable.report_path),
@@ -458,8 +437,137 @@ def _payloads(omissions: object) -> list[FigurePayload]:
     return payloads
 
 
-def _headings(text: str) -> list[str]:
-    return [line for line in text.splitlines() if line.startswith("#")]
+async def _diagram_payloads(
+    *,
+    settings: Settings,
+    key: str,
+    job_id: UUID,
+    job_dir: Path,
+    pdf_path: Path,
+    renders_dir: Path,
+    page_number: int,
+    omissions: object,
+    options: JobOptions,
+    emit: Emit,
+    total: int,
+) -> list[FigurePayload]:
+    """Reinterpret one page's figures as Mermaid (primary capability).
+
+    Each figure is cropped, optionally grounded in native text inside the bbox,
+    sent to the Cloud converter, validated, and (by default) vision-verified.
+    The resulting DiagramResult rides on the FigurePayload so
+    resolve_page_figures can emit the tiered representation. Disabled or
+    failed conversions leave `diagram=None` → image fallback.
+    """
+    payloads = _payloads(omissions)
+    if not payloads or not options.diagram_to_mermaid:
+        return payloads
+    from src.pdf import native_text  # local import: text grounding for figures
+
+    converter = GlmFlashAgent(
+        settings.OLLAMA_CLOUD_URL,
+        key,
+        model=settings.AGENT_MODEL,
+        thinking_effort=options.thinking_diagram,
+        timeout=settings.AGENT_TIMEOUT_SECONDS,
+        system_prompt=DIAGRAM_TEMPLATE,
+    )
+    verifier = (
+        GlmFlashAgent(
+            settings.OLLAMA_CLOUD_URL,
+            key,
+            model=settings.AGENT_MODEL,
+            thinking_effort=options.thinking_diagram,
+            timeout=settings.AGENT_TIMEOUT_SECONDS,
+            system_prompt=DIAGRAM_VERIFY_TEMPLATE,
+        )
+        if options.diagram_verify
+        else None
+    )
+    crops_dir = job_dir / "figures"
+    crops_dir.mkdir(parents=True, exist_ok=True)
+    allowed_types = settings.allowed_diagram_types()
+    results: list[FigurePayload] = []
+    for payload in payloads:
+        result = await _convert_one(
+            converter,
+            verifier,
+            pdf_path=pdf_path,
+            renders_dir=renders_dir,
+            crops_dir=crops_dir,
+            page_number=page_number,
+            payload=payload,
+            native_text_fn=native_text,
+            options=options,
+            allowed_types=allowed_types,
+        )
+        results.append(
+            FigurePayload(
+                index=payload.index,
+                bbox=payload.bbox,
+                alt=payload.alt,
+                caption=payload.caption,
+                diagram=result,
+            )
+        )
+        await emit(
+            {
+                "event": "log",
+                "job_id": str(job_id),
+                "level": "info",
+                "message": (
+                    f"page {page_number}/{total} figure {payload.index}: "
+                    + (
+                        f"mermaid {result.diagram_type} (confidence {result.confidence})"
+                        if result.convertible
+                        else f"image fallback ({result.reason})"
+                    )
+                ),
+            }
+        )
+    return results
+
+
+async def _convert_one(
+    converter: GlmFlashAgent,
+    verifier: GlmFlashAgent | None,
+    *,
+    pdf_path: Path,
+    renders_dir: Path,
+    crops_dir: Path,
+    page_number: int,
+    payload: FigurePayload,
+    native_text_fn: Callable[[Path, int], str],
+    options: JobOptions,
+    allowed_types: frozenset[str],
+) -> DiagramResult:
+    """Crop one figure + convert it; any failure degrades to image fallback."""
+    from src.pdf import crop_from_render, render_filename
+
+    render_path = renders_dir / render_filename(page_number)
+    x0, y0, x1, y1 = (round(v) for v in payload.bbox)
+    crop_path = crops_dir / f"page-{page_number:03d}-fig-{payload.index:02d}.png"
+    try:
+        data = crop_from_render(render_path, (x0, y0, x1, y1))
+        crop_path.write_bytes(data)
+    except ValueError, OSError:
+        return DiagramResult(convertible=False, reason="figure crop failed")
+    try:
+        grounding = native_text_fn(pdf_path, page_number)
+    except Exception:  # noqa: BLE001 - grounding is best-effort
+        grounding = ""
+    return await convert_figure(
+        converter,
+        verifier,
+        crop_path,
+        grounding,
+        page_number=page_number,
+        width=max(0, x1 - x0),
+        height=max(0, y1 - y0),
+        allowed_types=allowed_types,
+        min_confidence=options.diagram_min_confidence,
+        verify=options.diagram_verify,
+    )
 
 
 async def _fail(

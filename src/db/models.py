@@ -135,6 +135,11 @@ class Image(Base):
     alt_text: Mapped[str | None] = mapped_column(String(512), nullable=True)
     caption: Mapped[str | None] = mapped_column(Text, nullable=True)
     referenced: Mapped[bool] = mapped_column(default=False)
+    # --- Diagram -> Mermaid reinterpretation (primary capability) ---
+    mermaid: Mapped[str | None] = mapped_column(Text, nullable=True)
+    diagram_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    conversion_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    confidence: Mapped[int | None] = mapped_column(nullable=True)
 
     job: Mapped[Job] = relationship(back_populates="images")
 

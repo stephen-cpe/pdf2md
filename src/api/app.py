@@ -31,7 +31,7 @@ from src.pdf import preflight
 from src.pipeline import driver as driver_mod
 from src.pipeline.control import IllegalTransitionError, JobControl
 from src.pipeline.driver import JobOptions
-from src.pipeline.report import build_report, collect_job_pages
+from src.pipeline.report import build_report, collect_job_images, collect_job_pages
 from src.workspace import OutputDirError, Workspace
 
 PROBLEM_JSON = "application/problem+json"
@@ -255,33 +255,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             snapshot = {
                 "agent_model": settings.AGENT_MODEL,
                 "ocr_model": settings.OCR_MODEL,
-                "embed_model": settings.EMBED_MODEL,
                 "render_dpi": job_options.render_dpi,
                 "rolling_context_pages": job_options.rolling_context_pages,
                 "coverage_threshold": job_options.coverage_threshold,
                 "coverage_floor": job_options.coverage_floor,
-                "hybrid_routing": job_options.hybrid_routing,
                 "max_page_retries": job_options.max_page_retries,
                 "thinking_transcribe": job_options.thinking_transcribe,
-                "thinking_qa": job_options.thinking_qa,
+                "thinking_diagram": job_options.thinking_diagram,
                 "toc_enabled": job_options.toc_enabled,
                 "fig_details": job_options.fig_details,
+                "diagram_to_mermaid": job_options.diagram_to_mermaid,
+                "diagram_min_confidence": job_options.diagram_min_confidence,
+                "diagram_verify": job_options.diagram_verify,
+                "diagram_fallback": job_options.diagram_fallback,
+                "diagram_keep_image": job_options.diagram_keep_image,
                 "prompts": dict(PROMPT_VERSIONS),
             }
             pipeline_version = compute_pipeline_version(
                 agent_model=settings.AGENT_MODEL,
                 ocr_model=settings.OCR_MODEL,
-                embed_model=settings.EMBED_MODEL,
                 render_dpi=job_options.render_dpi,
                 rolling_context_pages=job_options.rolling_context_pages,
                 coverage_threshold=job_options.coverage_threshold,
                 coverage_floor=job_options.coverage_floor,
-                hybrid_routing=job_options.hybrid_routing,
                 max_page_retries=job_options.max_page_retries,
                 thinking_transcribe=job_options.thinking_transcribe,
-                thinking_qa=job_options.thinking_qa,
+                thinking_diagram=job_options.thinking_diagram,
                 toc_enabled=job_options.toc_enabled,
                 fig_details=job_options.fig_details,
+                diagram_to_mermaid=job_options.diagram_to_mermaid,
+                diagram_min_confidence=job_options.diagram_min_confidence,
             )
             async with factory() as session:
                 import hashlib
@@ -360,13 +363,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "render_dpi",
                         "coverage_threshold",
                         "coverage_floor",
-                        "hybrid_routing",
                         "max_page_retries",
                         "rolling_context_pages",
                         "toc_enabled",
                         "fig_details",
                         "thinking_transcribe",
-                        "thinking_qa",
+                        "thinking_diagram",
+                        "diagram_to_mermaid",
+                        "diagram_min_confidence",
+                        "diagram_verify",
+                        "diagram_fallback",
+                        "diagram_keep_image",
                     )
                     if key in snapshot
                 },
@@ -455,6 +462,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return problem(404, "report not ready", f"job is {job.status.value}")
         async with factory() as session:
             _, pages = await collect_job_pages(session, uid)
+            images = await collect_job_images(session, uid)
             results = (
                 (job.options or {}).get("results", {}) if isinstance(job.options, dict) else {}
             )
@@ -466,10 +474,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 pipeline_version=job.pipeline_version or "",
                 prompt_versions=dict(PROMPT_VERSIONS),
                 furniture_removed=results.get("furniture_removed", []),
-                qa_applied=results.get("qa_applied", 0),
-                qa_rejected=results.get("qa_rejected", 0),
-                qa_log=results.get("qa_log", []),
                 lint_warnings=results.get("lint_warnings", []),
+                images=images,
                 orphaned_figures=results.get("orphaned_figures", []),
             )
         return {"job_id": job_id, "report": report}

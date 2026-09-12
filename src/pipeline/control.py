@@ -18,7 +18,6 @@ _ACTIVE = (
     JobStatus.OCR,
     JobStatus.TRANSCRIBING,
     JobStatus.ASSEMBLING,
-    JobStatus.QA,
 )
 
 TRANSITIONS: dict[JobStatus, frozenset[JobStatus]] = {
@@ -34,8 +33,10 @@ TRANSITIONS: dict[JobStatus, frozenset[JobStatus]] = {
         {JobStatus.ASSEMBLING, JobStatus.PAUSED, JobStatus.FAILED, JobStatus.CANCELLED}
     ),
     JobStatus.ASSEMBLING: frozenset(
-        {JobStatus.QA, JobStatus.PAUSED, JobStatus.FAILED, JobStatus.CANCELLED}
+        {JobStatus.COMPLETED, JobStatus.PAUSED, JobStatus.FAILED, JobStatus.CANCELLED}
     ),
+    # Legacy QA state: retained for old job rows, not entered by the current
+    # pipeline (the whole-document QA pass was removed).
     JobStatus.QA: frozenset(
         {JobStatus.COMPLETED, JobStatus.PAUSED, JobStatus.FAILED, JobStatus.CANCELLED}
     ),

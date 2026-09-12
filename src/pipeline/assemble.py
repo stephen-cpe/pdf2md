@@ -4,8 +4,6 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from src.chroma import ChromaStore
-
 _FIG_TOKEN = re.compile(r"<!--FIG:(?:page:\d+|\d+:\d+):[\d.,]+-->")
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
@@ -145,15 +143,19 @@ def dedup_furniture(
 ) -> DedupResult:
     """Strip lines recurring on >=recurrence of pages (6.2, FR-QA-1/§6.2).
 
-    is_same is the similarity predicate: exact-normalized in unit tests,
-    Chroma-backed in production (make_chroma_similar). Returns cleaned pages
-    plus a log of {text, pages} for the conversion report. FIG placeholder
-    lines are NEVER furniture (FR-AGT-3): unresolved figures must survive to
-    fail QA loudly, and resolved image links differ per asset by construction.
+    is_same is the similarity predicate: exact-normalized by default, or a
+    caller-supplied fuzzy matcher. Returns cleaned pages plus a log of
+    {text, pages} for the conversion report. FIG placeholder lines are NEVER
+    furniture (FR-AGT-3): unresolved figures must survive to fail QA loudly,
+    and resolved image links differ per asset by construction.
     """
     total = len(page_texts)
     if total == 0:
         return DedupResult(pages=[])
+    # Running furniture is a recurrence phenomenon: with fewer than two pages
+    # every candidate line "recurs" at 100%, which would strip real content.
+    if total < 2:
+        return DedupResult(pages=list(page_texts))
     candidates: dict[str, str] = {}
     for text in page_texts:
         for line in candidate_lines(text):
@@ -192,30 +194,22 @@ def dedup_furniture(
     return DedupResult(pages=cleaned, removed=removed)
 
 
-def make_chroma_similar(store: ChromaStore, threshold: float = 0.85) -> Callable[[str, str], bool]:
-    """Chroma-backed similarity predicate (§6.2): cosine sim >= threshold.
+def make_exact_similar(threshold: float = 0.9) -> Callable[[str, str], bool]:
+    """Normalized-string similarity predicate (§6.2) without embeddings.
 
-    Embeddings are cached per normalized text so each unique line embeds once.
-    `store` is a ChromaStore (only its embed function is used — no Cloud).
+    Exact normalized matches always count; otherwise a difflib ratio at or
+    above `threshold` (default 0.9) counts as the same running furniture.
+    This keeps dedup fully local — no embedding model, no vector store.
     """
-    import math
-
-    cache: dict[str, list[float]] = {}
-
-    def _vec(text: str) -> list[float]:
-        if text not in cache:
-            cache[text] = store.embed([text])[0]
-        return cache[text]
-
-    def _cosine(left: list[float], right: list[float]) -> float:
-        dot = sum(a * b for a, b in zip(left, right))
-        denom = math.sqrt(sum(a * a for a in left)) * math.sqrt(sum(b * b for b in right))
-        return dot / denom if denom else 0.0
+    import difflib
 
     def is_same(left: str, right: str) -> bool:
-        if _normalize_line(left) == _normalize_line(right):
+        left_n, right_n = _normalize_line(left), _normalize_line(right)
+        if left_n == right_n:
             return True
-        return _cosine(_vec(_normalize_line(left)), _vec(_normalize_line(right))) >= threshold
+        if not left_n or not right_n:
+            return False
+        return difflib.SequenceMatcher(None, left_n, right_n).ratio() >= threshold
 
     return is_same
 
@@ -227,6 +221,6 @@ __all__ = [
     "candidate_lines",
     "dedup_furniture",
     "join_pages",
-    "make_chroma_similar",
+    "make_exact_similar",
     "normalize_headings",
 ]

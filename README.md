@@ -1,4 +1,4 @@
-# pdf2md — Hybrid-Agentic PDF → GitHub-Flavored Markdown Converter
+# pdf2md — PDF → GitHub-Flavored Markdown, with diagrams reinterpreted as Mermaid
 
 ## Disclaimer
 > This project is **experimental and for educational purposes only**. It is in a
@@ -7,20 +7,20 @@
 > on a small private test corpus.
 
 Locally-run app that converts one PDF at a time into faithful GitHub-Flavored
-Markdown (text, tables, formulas, lists — plus every figure extracted with AI
-alt-text). Each page is routed: born-digital text pages try deterministic
-extraction first (half the Cloud cost, no local OCR), gated by a single agent
-verification call plus an objective token-recall floor; anything the
-deterministic path cannot serve — scanned pages, figure-dense pages, pages
-that fail either gate — takes the full agentic path: a vision agent reads the
-rendered page, cross-checks local OCR ground truth, and self-verifies until
-it passes.
+Markdown (text, tables, formulas, lists) **and reinterprets its figures —
+diagrams, flowcharts, charts, graphs, schematics — as Mermaid source** wherever
+that can be done faithfully. Each page is transcribed by a vision agent
+(`glm-5.3-flash` on Ollama Cloud) cross-checked against local OCR ground truth
+(`glm-ocr`), gated by a self-verification pass and an objective token-recall
+floor. Then every flagged figure region is cropped, optionally grounded in the
+text inside it, and sent to a dedicated diagram→Mermaid conversion stage that is
+validated (type allowlist + structural checks) and vision-verified before it is
+trusted.
 
-Measured on a 6-document corpus with a 34-question golden set
-(`eval/BENCHMARK-REPORT.md`): **94% Recall@5 vs 68% for the pymupdf4llm
-baseline** — a tie on born-digital text documents, and **0% → 87.5%** on
-scanned (image-only) documents, where deterministic extraction gets nothing
-and the agentic path recovers full structure (headings, tables, formulas).
+The Mermaid code will not be perfect today. The models are improving, and the
+design assumes they will keep improving: reinterpretation quality is the metric
+the project now optimizes, and every fallback keeps the original figure so no
+information is ever silently lost.
 
 Output layout (many documents share one output folder without collisions):
 
@@ -34,13 +34,11 @@ Output layout (many documents share one output folder without collisions):
 Image links inside each `.md` are `<docname>/assets/…` (relative, portable).
 Re-converting the same document replaces only its own files.
 
-Privacy note: page images are sent to Ollama Cloud for the agent stage. OCR
-stays fully local. Deterministic-routed pages send only the page image (one
-verification call).
+Privacy note: page images **and cropped figure regions** are sent to Ollama
+Cloud for the agent and diagram stages. OCR stays fully local.
 
 Status: **experimental / proof of concept** — see the disclaimer above.
-Requirements are normative in `docs/SRS.md`; measured quality claims live in
-`eval/BENCHMARK-REPORT.md`.
+Requirements are normative in `docs/SRS.md`.
 
 ---
 
@@ -58,8 +56,8 @@ Use regular Command Prompt (`cmd`); steps needing Administrator rights are marke
   `sc query type= service state= all | findstr /I postgresql`.
   If `psql` is not recognized, add `C:\Program Files\PostgreSQL\18\bin` to your user PATH.
 - [ ] Ollama responding: `curl http://localhost:11434/api/version`
-  (if it fails, launch Ollama once from the Start menu). Pull local models:
-  `ollama pull glm-ocr` and `ollama pull qwen3-embedding:0.6b`, then `ollama list`.
+  (if it fails, launch Ollama once from the Start menu). Pull the local OCR model:
+  `ollama pull glm-ocr`, then `ollama list`.
 - [ ] Ollama Cloud: `ollama signin` (browser), then create an API key named
   `pdf2md-agent` in Ollama account settings → API Keys. Verify:
   `curl https://ollama.com/api/tags -H "Authorization: Bearer YOUR_KEY"` lists `glm-5.3-flash`.
@@ -103,12 +101,17 @@ psql -U pdf2md -h localhost -d pdf2md -c "SELECT version();"
 ```
 
 All other keys have working defaults (see `docs/SRS.md` Appendix B):
-`AGENT_MODEL=glm-5.3-flash`, `OCR_MODEL=glm-ocr`, `EMBED_MODEL=qwen3-embedding:0.6b`,
-`RENDER_DPI=200`, `COVERAGE_THRESHOLD=95`, `COVERAGE_FLOOR_TOKENS=80`,
-`HYBRID_ROUTING=false`, `MAX_PAGE_RETRIES=2`, `CHROMA_PATH=./chroma`.
-Set `HYBRID_ROUTING=true` to enable deterministic-first page routing
-(recommended for mixed born-digital corpora; scanned pages route agentic
-automatically either way).
+`AGENT_MODEL=glm-5.3-flash`, `OCR_MODEL=glm-ocr`, `RENDER_DPI=200`,
+`COVERAGE_THRESHOLD=95`, `COVERAGE_FLOOR_TOKENS=80`, `MAX_PAGE_RETRIES=2`.
+
+Diagram→Mermaid (the primary capability) is on by default and config-gated:
+
+- `DIAGRAM_TO_MERMAID=true` — enable figure reinterpretation.
+- `DIAGRAM_ALLOWED_TYPES` — comma-separated Mermaid type allowlist.
+- `DIAGRAM_MIN_CONFIDENCE=80` — converter confidence needed to accept.
+- `DIAGRAM_VERIFY=true` — vision-verify each candidate against the crop.
+- `DIAGRAM_FALLBACK=both` — `image` | `table` | `both` (charts get tables).
+- `DIAGRAM_KEEP_IMAGE=true` — keep the original figure under a converted Mermaid.
 
 Then apply migrations:
 
@@ -117,7 +120,7 @@ venv\Scripts\python -m alembic upgrade head
 venv\Scripts\python -m alembic current
 ```
 
-`current` must print the head revision (`a73cb35dc5f1 (head)`).
+`current` must print the head revision (`b84dc46ed6a2 (head)`).
 
 ## 4. Test corpus
 
@@ -129,12 +132,8 @@ PDFs** inside (plus one small 2–5 page PDF for fast runs):
 | 1 | Scanned book chapter (image-only PDF) | Pure-vision path, no text layer |
 | 2 | Technical paper with formulas + a 2+ page table | Math + cross-page merging |
 | 3 | Slide-deck-style PDF | Sparse layout, big figures |
-| 4 | Image-heavy report | Figure extraction + alt-text at volume |
+| 4 | Image-heavy report | Figure extraction + Mermaid at volume |
 | 5 | Two-column academic paper | Reading-order / column linearization |
-
-`eval\make_scanned_doc.py` can synthesize a scanned fixture
-(`corpus\scanned_knowledge_handbook.pdf`, zero native text) if you don't have
-a real scanned PDF handy — it is the corpus entry the agentic path exists for.
 
 ## 5. Run
 
@@ -147,7 +146,7 @@ convert. (`python -m src` prints a config smoke line; `python -m src --serve`
 serves identically. The entry point sets `WindowsSelectorEventLoopPolicy` first —
 required on Windows for asyncpg/WebSocket stability; do not reorder imports above it.)
 
-Health check (all six must print PASS, no secrets printed):
+Health check (all five must print PASS, no secrets printed):
 
 ```cmd
 venv\Scripts\python -c "from src.config import load_settings; from src.health import run_all; [print(('PASS' if r.ok else 'FAIL'), r.name, '-', r.message) for r in run_all(load_settings())]"
@@ -166,36 +165,30 @@ Live-model tests (`@pytest.mark.live`) never run by default — they spend
 Cloud quota. Run them explicitly only when you need live-model verification:
 `python -m pytest tests -m live -o addopts=""`.
 
-Suite: 230 unit (no network/DB/Ollama) + 46 integration (real
-Postgres/Chroma/local Ollama, cloud mocked) green. Two integration tests that
-need sustained local-embedding calls (`test_driver`, `test_chroma_embed`) can be
-slow if Ollama is busy.
+## 7. Diagram → Mermaid (primary capability)
 
-## 6a. Benchmark (retrieval quality, measured)
+For every figure region the page agent flags:
 
-The `eval\` directory ships the retrieval evaluation harness used for the
-headline claims:
+1. **Crop** the region from the rendered page.
+2. **Ground** it in native text inside the region (best effort).
+3. **Convert** with a dedicated Cloud call (`DIAGRAM_TEMPLATE`).
+4. **Validate** — Mermaid type on the first line, allowlisted, non-empty body,
+   no leftover pipeline markers.
+5. **Verify** — a second Cloud call compares the Mermaid source against the
+   crop (`DIAGRAM_VERIFY_TEMPLATE`); fabricated nodes/edges/values fail it.
+6. **Emit** the tiered representation:
 
-```cmd
-venv\Scripts\python eval\make_scanned_doc.py   (once: synthesizes the scanned corpus fixture)
-venv\Scripts\python -X utf8 eval\run_eval.py --pipeline eval\baseline-md --pipeline eval\pdf2md-md --chunker sections
-```
+| Tier | When | Output at the token site |
+|---|---|---|
+| Mermaid | validated + verified | ` ```mermaid ` block + collapsible original figure |
+| Table + image | data chart, or Mermaid fidelity fails | OCR-grounded GFM table + image |
+| Image + alt | photo/illustration/map, or crop fails | image + alt + caption + long description |
 
-- `eval/goldenset.json` — 34 questions across 6 corpus PDFs (5 born-digital
-  + 1 synthetic scanned doc), each with expected substrings for hit-checking.
-- `--chunker sections|hierarchy` — same documents, same embedding model
-  (`qwen3-embedding:0.6b`), same Chroma retrieval; only chunking differs.
-- Results: Recall@5 + MRR per pipeline, per-question detail in
-  `eval/results*.json`; findings and the decision analysis in
-  `eval/BENCHMARK-REPORT.md`.
+Nothing is silently dropped: a figure that cannot be represented still lands as
+an asset link, and the conversion report lists per-figure status and the overall
+conversion rate.
 
-Headline numbers (2026-09-10 run): pdf2md 94% Recall@5 / MRR 0.64 vs
-pymupdf4llm baseline 68% / 0.54 (sections chunker). Gap decomposition:
-born-digital documents tie at 88%; the scanned document swings 0% → 87.5%.
-Hybrid-routing A/B (same doc converted twice): identical retrieval,
-~40% less wall-clock, zero local OCR on routed pages.
-
-## 7. Troubleshooting
+## 8. Troubleshooting
 
 ### Local OCR timeouts (>120 s) / rendering slow
 
@@ -217,11 +210,8 @@ cleanly (open WebSockets close quietly).
 
 ### Restart / reinitialize from scratch (Windows 11)
 
-Zero history: no jobs, no checkpoints, no embeddings, no workspaces, no
-deliverables. Stop the server first (Ctrl+C), then run all four steps in
-order from the project root. Step 1 drops the tables and only step 2
-rebuilds them — if step 2 did not apply, the app boots but every request
-fails with `relation "jobs" does not exist`.
+Stop the server first (Ctrl+C), then run all steps in order from the project
+root. Step 1 drops the tables and only step 2 rebuilds them.
 
 ```cmd
 psql -U postgres -h localhost -d pdf2md -f init_db.sql
@@ -229,11 +219,11 @@ venv\Scripts\python -m alembic upgrade head
 venv\Scripts\python -m alembic current
 ```
 
-`current` must print `a73cb35dc5f1 (head)`. Empty output means the upgrade
+`current` must print `b84dc46ed6a2 (head)`. Empty output means the upgrade
 did not apply — do not continue; re-run the upgrade and read its error.
 
 ```cmd
-rmdir /s /q workspace chroma
+rmdir /s /q workspace
 del /q output\*.md output\*.pdf
 for /d %i in (output\*) do rmdir /s /q "%i"
 ```
@@ -247,12 +237,6 @@ re-run `init_db.sql` and upgrade again.
 python app.py
 ```
 
-Expect: no "incomplete job" warnings at startup, empty History, health
-all-green. Convert the `corpus\` PDFs one at a time through the UI.
-
-Never delete `corpus\`, `.env`, or `chroma\` while the server runs (stop it
-first — Windows file locks).
-
 ### Symptom → fix quick table
 
 | Symptom | Fix |
@@ -260,11 +244,10 @@ first — Windows file locks).
 | `python` opens Microsoft Store | Disable `python.exe`/`python3.exe` app execution aliases |
 | `psql` not recognized | Add `C:\Program Files\PostgreSQL\18\bin` to user PATH |
 | Ollama `curl` fails | Launch Ollama once from Start menu, retry |
-| `ollama list` missing models | `ollama pull glm-ocr` + `ollama pull qwen3-embedding:0.6b` |
+| `ollama list` missing model | `ollama pull glm-ocr` |
 | Cloud key rejected | Recheck `OLLAMA_API_KEY` in `.env`; direct-check `/api/tags` |
-| `relation "jobs" does not exist` after a reset | Step 2 above did not apply — re-run `alembic upgrade head` and confirm `alembic current` prints `a73cb35dc5f1 (head)` before starting the app |
+| `relation "jobs" does not exist` after a reset | Re-run `alembic upgrade head` and confirm `alembic current` prints `b84dc46ed6a2 (head)` before starting the app |
 
 ## Docs
 
 - `docs/SRS.md` — requirements (normative)
-- `eval/BENCHMARK-REPORT.md` — measured retrieval benchmark + routing A/B findings

@@ -5,6 +5,7 @@ import pytest
 from src.pipeline.envelope import (
     EnvelopeError,
     corrective_prompt,
+    parse_diagram,
     parse_transcription,
     parse_verdict,
 )
@@ -158,3 +159,59 @@ def test_corrective_prompt_names_defect() -> None:
         assert "truncated" in prompt and "<<<MARKDOWN>>>" in prompt and "column 0" in prompt
     else:  # pragma: no cover
         raise AssertionError("expected EnvelopeError")
+
+
+VALID_DIAGRAM = """<<<DIAGRAM>>>
+{"convertible": true, "type": "flowchart", "confidence": 90, "description": "a flow"}
+<<<END_DIAGRAM>>>
+<<<MERMAID>>>
+flowchart TD
+  A[Start] --> B[End]
+<<<END_MERMAID>>>
+<<<DATA>>>
+{"columns": ["x", "y"], "rows": [["a", "1"]]}
+<<<END_DATA>>>"""
+
+
+def test_valid_diagram() -> None:
+    parsed = parse_diagram(VALID_DIAGRAM)
+    assert parsed.convertible and parsed.diagram_type == "flowchart"
+    assert parsed.confidence == 90
+    assert parsed.mermaid.startswith("flowchart TD")
+    assert parsed.data is not None and parsed.data.columns == ("x", "y")
+
+
+def test_diagram_not_convertible_with_empty_data() -> None:
+    raw = (
+        "<<<DIAGRAM>>>\n"
+        '{"convertible": false, "type": "", "confidence": 0, "description": "photo"}\n'
+        "<<<END_DIAGRAM>>>\n<<<MERMAID>>>\n\n<<<END_MERMAID>>>\n<<<DATA>>>\n\n<<<END_DATA>>>"
+    )
+    parsed = parse_diagram(raw)
+    assert not parsed.convertible and parsed.data is None and parsed.description == "photo"
+
+
+@pytest.mark.parametrize(
+    ("payload", "pattern"),
+    [
+        ('{"convertible": "yes", "type": "", "confidence": 0}', "convertible"),
+        ('{"convertible": true, "type": 7, "confidence": 0}', "type"),
+        ('{"convertible": true, "type": "", "confidence": 101}', "confidence"),
+        ('{"convertible": true, "type": "", "confidence": true}', "confidence"),
+        ("[1, 2]", "object"),
+    ],
+)
+def test_malformed_diagram_payloads(payload: str, pattern: str) -> None:
+    raw = (
+        f"<<<DIAGRAM>>>\n{payload}\n<<<END_DIAGRAM>>>\n"
+        "<<<MERMAID>>>\nflowchart TD\n A-->B\n<<<END_MERMAID>>>\n"
+        "<<<DATA>>>\n{}\n<<<END_DATA>>>"
+    )
+    with pytest.raises(EnvelopeError, match=pattern):
+        parse_diagram(raw)
+
+
+def test_malformed_diagram_data() -> None:
+    raw = VALID_DIAGRAM.replace('{"columns": ["x", "y"], "rows": [["a", "1"]]}', '{"columns": "x"}')
+    with pytest.raises(EnvelopeError, match="DATA.columns"):
+        parse_diagram(raw)

@@ -75,6 +75,27 @@ class RenderInfo:
     page_count: int
 
 
+def native_text(pdf_path: Path, page_number: int) -> str:
+    """Raw native text layer of one 1-based page ('' when none).
+
+    Used to ground diagram reinterpretation: text inside a figure's bbox is
+    the exact character reference for labels/values. Read-only, never raises
+    for out-of-range/undecodable pages (returns '').
+    """
+    try:
+        doc = pymupdf.open(pdf_path)
+    except Exception:
+        return ""
+    try:
+        if page_number < 1 or page_number > doc.page_count:
+            return ""
+        return str(doc[page_number - 1].get_text())
+    except Exception:
+        return ""
+    finally:
+        doc.close()
+
+
 def render_filename(page_number: int) -> str:
     """Deterministic render name (re-renders overwrite the same file)."""
     return f"page-{page_number:03d}.png"
@@ -199,6 +220,7 @@ __all__ = [
     "asset_name",
     "crop_from_render",
     "extract_native_images",
+    "native_text",
     "preflight",
     "render_filename",
     "render_page",
