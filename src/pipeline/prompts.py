@@ -114,12 +114,22 @@ def compute_pipeline_version(
     max_page_retries: int,
     thinking_transcribe: str,
     thinking_diagram: str,
+    native_text_first: bool,
+    native_text_min_words: int,
     toc_enabled: bool,
     fig_details: bool,
     diagram_to_mermaid: bool,
     diagram_min_confidence: int,
+    diagram_verify: bool,
+    diagram_fallback: str,
+    diagram_keep_image: bool,
 ) -> str:
-    """Deterministic job fingerprint: any input change → new version."""
+    """Deterministic job fingerprint: any input change → new version.
+
+    Every behavior-changing JobOptions knob MUST be included; a config change
+    that is absent here would let a resumed job silently mix pipeline
+    behavior (the failure this fingerprint exists to prevent).
+    """
     canonical = json.dumps(
         {
             "prompts": prompts if prompts is not None else PROMPT_VERSIONS,
@@ -132,10 +142,15 @@ def compute_pipeline_version(
             "max_page_retries": max_page_retries,
             "thinking_transcribe": thinking_transcribe,
             "thinking_diagram": thinking_diagram,
+            "native_text_first": native_text_first,
+            "native_text_min_words": native_text_min_words,
             "toc_enabled": toc_enabled,
             "fig_details": fig_details,
             "diagram_to_mermaid": diagram_to_mermaid,
             "diagram_min_confidence": diagram_min_confidence,
+            "diagram_verify": diagram_verify,
+            "diagram_fallback": diagram_fallback,
+            "diagram_keep_image": diagram_keep_image,
         },
         sort_keys=True,
         separators=(",", ":"),

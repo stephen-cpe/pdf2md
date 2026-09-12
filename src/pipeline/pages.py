@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.db import repo
 from src.db.models import JobStatus, Page, PageStatus
-from src.pdf import RenderInfo, render_filename, render_page
+from src.pdf import RenderInfo, native_text_if_viable, render_filename, render_page
 from src.pipeline.agent import AgentResult, TranscriptionAgent
 from src.pipeline.control import IllegalTransitionError, JobControl
 from src.pipeline.coverage import floor_failure, recall
@@ -46,6 +46,7 @@ from src.pipeline.resilience import PauseJob, resilient
 OcrCaller = OcrEngine
 AgentCaller = TranscriptionAgent
 RenderFn = Callable[[Path, int, int, Path], RenderInfo]
+NativeTextFn = Callable[[Path, int, int], "str | None"]
 
 
 @dataclass
@@ -64,6 +65,11 @@ class PageDeps:
     coverage_floor_min_ocr_tokens: int = 30
     max_page_retries: int = 2
     rolling_context_pages: int = 3
+    # Per-page reference routing (driver passes the setting; the dataclass
+    # default stays OCR-first so direct/test construction is unchanged).
+    native_text_first: bool = False
+    native_text_min_words: int = 20
+    native_text_fn: NativeTextFn = native_text_if_viable
 
 
 @dataclass
@@ -150,6 +156,32 @@ async def _transcribe_with_corrective(
     raise last_error
 
 
+async def _render_native(
+    pdf_path: Path,
+    page_number: int,
+    render_path: Path,
+    deps: PageDeps,
+) -> tuple[str, int, int, int] | None:
+    """Render at base DPI and use the native text layer as the reference.
+
+    Returns (reference_text, width, height, dpi) when the page has a
+    substantial native text layer and NATIVE_TEXT_FIRST is enabled; None when
+    the caller should take the OCR path. The reference feeds the same prompt
+    and coverage floor as OCR text — it is exact, costs zero model calls, and
+    is never a lossy re-reading (the FR-FLR rationale favors it whenever the
+    layer exists).
+    """
+    if not deps.native_text_first:
+        return None
+    reference = deps.native_text_fn(pdf_path, page_number, deps.native_text_min_words)
+    if reference is None:
+        return None
+    info = await asyncio.to_thread(
+        deps.render_fn, pdf_path, page_number, deps.render_dpi, render_path
+    )
+    return reference, info.width, info.height, deps.render_dpi
+
+
 async def process_page(
     session: AsyncSession,
     *,
@@ -172,10 +204,17 @@ async def process_page(
         )
     render_path = renders_dir / render_filename(page_number)
     start = time.perf_counter()
-    ocr_text, width, height, actual_dpi = await _render_ocr(
-        pdf_path, page_number, deps.render_dpi, render_path, deps
-    )
-    first_ms = (time.perf_counter() - start) * 1000.0
+    native = await _render_native(pdf_path, page_number, render_path, deps)
+    if native is not None:
+        ocr_text, width, height, actual_dpi = native
+        first_ms = (time.perf_counter() - start) * 1000.0
+        reference_is_native = True
+    else:
+        ocr_text, width, height, actual_dpi = await _render_ocr(
+            pdf_path, page_number, deps.render_dpi, render_path, deps
+        )
+        first_ms = (time.perf_counter() - start) * 1000.0
+        reference_is_native = False
     return await _cycles(
         session,
         job_id=job_id,
@@ -190,6 +229,7 @@ async def process_page(
         deps=deps,
         rolling_context=rolling_context,
         outline=outline,
+        reference_is_native=reference_is_native,
     )
 
 
@@ -619,10 +659,13 @@ async def _cycles(
     rolling_context: str,
     outline: str,
     ocr_ms_base: float = 0.0,
+    reference_is_native: bool = False,
 ) -> PageOutcome:
-    """Shared verify-retry core for both loop variants (4.2).
+    """Shared verify-retry core (4.2).
 
-    Retries re-render at higher DPI + re-OCR (FR-PDF-4/FR-OCR-2).
+    Retries re-render at higher DPI (FR-PDF-4). When the reference was the
+    native text layer, retries keep that exact reference and only sharpen the
+    image; otherwise retries re-OCR the new render (FR-OCR-2).
     """
     misses_note = ""
     best_markdown = ""
@@ -637,18 +680,27 @@ async def _cycles(
     transcribe_ms = verify_ms = 0.0
     outcome_dpi = dpi
     outcome_width, outcome_height = width, height
+    reference_kind = "native" if reference_is_native else "ocr"
     for attempt in range(deps.max_page_retries + 1):
         if attempt > 0:
-            # An agentic retry: (re-)render + OCR at the next DPI step.
+            # An agentic retry: (re-)render at the next DPI step.
             outcome_dpi = min(deps.max_dpi, outcome_dpi + deps.dpi_step)
             start = time.perf_counter()
-            ocr_text, outcome_width, outcome_height, actual_dpi = await _render_ocr(
-                pdf_path, page_number, outcome_dpi, render_path, deps
-            )
-            # actual_dpi may be lower than outcome_dpi if fallback triggered
-            outcome_dpi = actual_dpi
-            ocr_ms += (time.perf_counter() - start) * 1000.0
-            width, height = outcome_width, outcome_height
+            if reference_is_native:
+                info = await asyncio.to_thread(
+                    deps.render_fn, pdf_path, page_number, outcome_dpi, render_path
+                )
+                outcome_width, outcome_height = info.width, info.height
+                ocr_ms += (time.perf_counter() - start) * 1000.0
+                width, height = outcome_width, outcome_height
+            else:
+                ocr_text, outcome_width, outcome_height, actual_dpi = await _render_ocr(
+                    pdf_path, page_number, outcome_dpi, render_path, deps
+                )
+                # actual_dpi may be lower than outcome_dpi if fallback triggered
+                outcome_dpi = actual_dpi
+                ocr_ms += (time.perf_counter() - start) * 1000.0
+                width, height = outcome_width, outcome_height
         context = (rolling_context + misses_note).strip()
         start = time.perf_counter()
         try:
@@ -714,6 +766,7 @@ async def _cycles(
                     },
                     "notes": env.notes,
                     "floor_score": floor_score,
+                    "reference": reference_kind,
                 },
                 token_usage={"prompt": prompt_tokens, "completion": completion_tokens},
                 timings=_telemetry(
@@ -775,6 +828,7 @@ async def _cycles(
                 else "verification cap reached"
             ),
             "floor_score": best_floor,
+            "reference": reference_kind,
         },
         token_usage={"prompt": prompt_tokens, "completion": completion_tokens},
         timings=_telemetry(

@@ -9,13 +9,13 @@
 Locally-run app that converts one PDF at a time into faithful GitHub-Flavored
 Markdown (text, tables, formulas, lists) **and reinterprets its figures —
 diagrams, flowcharts, charts, graphs, schematics — as Mermaid source** wherever
-that can be done faithfully. Each page is transcribed by a vision agent
-(`glm-5.3-flash` on Ollama Cloud) cross-checked against local OCR ground truth
-(`glm-ocr`), gated by a self-verification pass and an objective token-recall
-floor. Then every flagged figure region is cropped, optionally grounded in the
-text inside it, and sent to a dedicated diagram→Mermaid conversion stage that is
-validated (type allowlist + structural checks) and vision-verified before it is
-trusted.
+that can be done faithfully. Each page obtains a character reference — its own
+native text layer when it has one (exact, no OCR call), otherwise local OCR
+(`glm-ocr`) — and a vision agent (`glm-5.3-flash` on Ollama Cloud) transcribes
+it, gated by a self-verification pass and an objective token-recall floor. Then
+every flagged figure region is cropped, optionally grounded in the text inside
+it, and sent to a dedicated diagram→Mermaid conversion stage that is validated
+(type allowlist + structural checks) and vision-verified before it is trusted.
 
 The Mermaid code will not be perfect today. The models are improving, and the
 design assumes they will keep improving: reinterpretation quality is the metric
@@ -104,6 +104,12 @@ All other keys have working defaults (see `docs/SRS.md` Appendix B):
 `AGENT_MODEL=glm-5.3-flash`, `OCR_MODEL=glm-ocr`, `RENDER_DPI=200`,
 `COVERAGE_THRESHOLD=95`, `COVERAGE_FLOOR_TOKENS=80`, `MAX_PAGE_RETRIES=2`.
 
+Per-page reference routing is on by default and config-gated:
+
+- `NATIVE_TEXT_FIRST=true` — pages with a substantial native text layer use it
+  as the reference and skip OCR (exact characters, no local model call).
+- `NATIVE_TEXT_MIN_WORDS=20` — native-layer floor for routing.
+
 Diagram→Mermaid (the primary capability) is on by default and config-gated:
 
 - `DIAGRAM_TO_MERMAID=true` — enable figure reinterpretation.
@@ -147,7 +153,6 @@ serves identically. The entry point sets `WindowsSelectorEventLoopPolicy` first 
 required on Windows for asyncpg/WebSocket stability; do not reorder imports above it.)
 
 Health check (all five must print PASS, no secrets printed):
-
 ```cmd
 venv\Scripts\python -c "from src.config import load_settings; from src.health import run_all; [print(('PASS' if r.ok else 'FAIL'), r.name, '-', r.message) for r in run_all(load_settings())]"
 ```

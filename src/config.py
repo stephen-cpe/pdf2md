@@ -73,6 +73,11 @@ class Settings(BaseSettings):
     MAX_PAGE_RETRIES: int = Field(default=2, ge=0)
     MAX_PDF_MB: PositiveInt = 500
     MAX_PDF_PAGES: PositiveInt = 1000
+    # Per-page reference routing: a page with a substantial native text layer
+    # uses it as the character reference (exact, zero model calls); OCR runs
+    # only for scanned/sparse pages and as the retry escalation.
+    NATIVE_TEXT_FIRST: bool = True
+    NATIVE_TEXT_MIN_WORDS: PositiveInt = 20
     THINKING_EFFORT_TRANSCRIBE: Literal["low", "high"] = "low"
     THINKING_EFFORT_DIAGRAM: Literal["low", "high"] = "high"
     TOC_ENABLED: bool = True

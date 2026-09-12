@@ -148,10 +148,18 @@ def _fig_env(markdown: str, figures: str) -> str:
 
 
 def _figure_pdf(path: Path) -> Path:
-    """Born-digital page with a placed raster so the figure crop succeeds."""
+    """Born-digital page with a placed raster so the figure crop succeeds.
+
+    The text layer is substantial (>20 words) so the page routes to the
+    native reference and the driver's per-page routing is exercised.
+    """
     doc = pymupdf.open()
     page = doc.new_page(width=400, height=400)
-    page.insert_text((72, 72), "driver figure page " * 10)
+    page.insert_textbox(
+        pymupdf.Rect(20, 20, 380, 130),
+        " ".join(f"driverword{i:03d}" for i in range(40)),
+        fontsize=9,
+    )
     pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 50, 50))
     page.insert_image(pymupdf.Rect(50, 150, 250, 300), pixmap=pix)
     doc.save(path)
@@ -207,6 +215,8 @@ async def test_driver_converts_figure_to_mermaid(tmp_path: Path, monkeypatch) ->
                 render_dpi=options.render_dpi,
                 coverage_threshold=options.coverage_threshold,
                 max_page_retries=options.max_page_retries,
+                native_text_first=options.native_text_first,
+                native_text_min_words=options.native_text_min_words,
             )
 
         monkeypatch.setattr(driver_mod, "PageDeps", _fake_deps)
@@ -247,11 +257,13 @@ async def test_driver_converts_figure_to_mermaid(tmp_path: Path, monkeypatch) ->
         assert "```mermaid" in text and "A[Start] --> B[End]" in text
         from sqlalchemy import select
 
-        from src.db.models import Image
+        from src.db.models import Image, Page
 
         async with factory() as session:
             rows = (await session.scalars(select(Image).where(Image.job_id == jid))).all()
             assert len(rows) == 1 and rows[0].conversion_status == "mermaid"
+            page = await session.scalar(select(Page).where(Page.job_id == jid))
+            assert page is not None and page.omissions["reference"] == "native"
     finally:
         async with factory() as session:
             for job_id in created:

@@ -10,6 +10,9 @@ from src.pdf import (
     asset_name,
     crop_from_render,
     extract_native_images,
+    native_text,
+    native_text_if_viable,
+    native_text_in_bbox,
     preflight,
     render_filename,
     render_page,
@@ -164,3 +167,102 @@ def test_crop_from_render(tmp_path) -> None:
 def test_asset_name() -> None:
     assert asset_name(1, 1, "png") == "page-001-img-01.png"
     assert asset_name(42, 3, "jpg") == "page-042-img-03.jpg"
+
+
+# --- native_text_in_bbox (diagram grounding) ---
+
+
+def _two_region_pdf(path: Path) -> Path:
+    """One page, top label vs bottom label in separate regions."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=400, height=400)
+    page.insert_text((50, 60), "TOPLABEL", fontsize=12)
+    page.insert_text((50, 360), "BOTTOMLABEL", fontsize=12)
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def test_native_text_in_bbox_returns_only_region_text(tmp_path) -> None:
+    pdf = _two_region_pdf(tmp_path / "regions.pdf")
+    # No render: bbox is interpreted as PDF points 1:1.
+    bottom = native_text_in_bbox(pdf, 1, (0.0, 300.0, 400.0, 400.0))
+    top = native_text_in_bbox(pdf, 1, (0.0, 0.0, 400.0, 100.0))
+    assert "BOTTOMLABEL" in bottom and "TOPLABEL" not in bottom
+    assert "TOPLABEL" in top and "BOTTOMLABEL" not in top
+
+
+def test_native_text_in_bbox_scales_render_pixels(tmp_path) -> None:
+    """Agent bboxes are render pixels; the helper converts via render dims."""
+    pdf = _two_region_pdf(tmp_path / "regions.pdf")
+    render = tmp_path / "page.png"
+    render_page(pdf, 1, 144, render)  # 2x scale (144/72)
+    # Bottom region in rendered pixels (200..800 y at 2x).
+    bottom = native_text_in_bbox(pdf, 1, (0.0, 600.0, 800.0, 800.0), render)
+    top = native_text_in_bbox(pdf, 1, (0.0, 0.0, 800.0, 200.0), render)
+    assert "BOTTOMLABEL" in bottom and "TOPLABEL" not in bottom
+    assert "TOPLABEL" in top and "BOTTOMLABEL" not in top
+
+
+def test_native_text_in_bbox_empty_and_defective(tmp_path) -> None:
+    pdf = _two_region_pdf(tmp_path / "regions.pdf")
+    assert native_text_in_bbox(pdf, 1, (0.0, 150.0, 400.0, 250.0)).strip() == ""
+    assert native_text_in_bbox(pdf, 9, (0.0, 0.0, 10.0, 10.0)) == ""
+    assert native_text_in_bbox(tmp_path / "missing.pdf", 1, (0.0, 0.0, 10.0, 10.0)) == ""
+
+
+def test_native_text_still_returns_whole_page(tmp_path) -> None:
+    pdf = _two_region_pdf(tmp_path / "regions.pdf")
+    whole = native_text(pdf, 1)
+    assert "TOPLABEL" in whole and "BOTTOMLABEL" in whole
+
+
+# --- native_text_if_viable (per-page reference routing) ---
+
+
+def test_native_text_if_viable_substantial(tmp_path) -> None:
+    pdf = _text_pdf(tmp_path / "valid.pdf", pages=1)
+    text = native_text_if_viable(pdf, 1, min_words=20)
+    assert text is not None and "Hello deterministic" in text
+
+
+def test_native_text_if_viable_sparse_returns_none(tmp_path) -> None:
+    pdf = _two_region_pdf(tmp_path / "regions.pdf")  # 2 words on the page
+    assert native_text_if_viable(pdf, 1, min_words=20) is None
+
+
+def test_native_text_if_viable_prose_below_words_returns_none(tmp_path) -> None:
+    """Ordinary prose with few words must not trip the CJK char fallback."""
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "driver figure page " * 10)  # 12 words, 72 chars
+    doc.save(tmp_path / "prose.pdf")
+    doc.close()
+    assert len(native_text(tmp_path / "prose.pdf", 1).split()) < 20
+    assert native_text_if_viable(tmp_path / "prose.pdf", 1, min_words=20) is None
+
+
+def test_native_text_if_viable_scanned_returns_none(tmp_path) -> None:
+    pdf = _scanned_pdf(tmp_path / "scan.pdf")
+    assert native_text_if_viable(pdf, 1, min_words=20) is None
+
+
+def test_native_text_if_viable_cjk_char_fallback(tmp_path) -> None:
+    """Space-less scripts count as one word; the char fallback keeps them.
+
+    PyMuPDF clips the inserted CJK run to one line (~48 chars), which is
+    under the word threshold but over the 3-chars-per-word fallback.
+    """
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text(
+        (72, 72), "\u4e2d\u6587\u6d4b\u8bd5\u5185\u5bb9\u793a\u4f8b" * 10, fontname="china-s"
+    )
+    doc.save(tmp_path / "cjk.pdf")
+    doc.close()
+    text = native_text_if_viable(tmp_path / "cjk.pdf", 1, min_words=10)
+    assert text is not None and len(text.strip()) >= 30
+
+
+def test_native_text_if_viable_defective_returns_none(tmp_path) -> None:
+    assert native_text_if_viable(tmp_path / "missing.pdf", 1, min_words=20) is None

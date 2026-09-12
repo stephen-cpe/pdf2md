@@ -634,3 +634,146 @@ async def test_lookahead_overlaps_ocr_and_transcribe(db, tmp_path: Path) -> None
     )
     # No timeout fired above: OCR(2) provably started while transcribe(1) ran.
     assert summary.done_pages == [1, 2]
+
+
+# --- per-page reference routing (native text first, OCR fallback) ---
+
+
+async def test_native_first_skips_ocr_on_born_digital(db, tmp_path: Path) -> None:
+    """A page with a substantial text layer uses it as the reference:
+    the agent sees the exact native text and OCR is never called."""
+    factory, created = db
+    pdf = _rich_pdf(tmp_path, pages=1)
+    job_id = await _job(factory, created, tmp_path, pages=1)
+    agent = FakeAgent({1: [_env("# P1\nbody")]})
+    verifier = FakeAgent({1: [_verdict(97)]})
+
+    class _BoomOcr:
+        async def run_page(self, *a, **k):
+            raise AssertionError("OCR must not run for native-text pages")
+
+    deps = _deps(
+        _BoomOcr(),
+        agent,
+        verifier,
+        native_text_first=True,
+        native_text_min_words=20,
+        coverage_floor=0.0,  # routing test: the floor is exercised elsewhere
+    )
+    async with factory() as session:
+        outcome = await process_page(
+            session,
+            job_id=job_id,
+            page_number=1,
+            pdf_path=pdf,
+            renders_dir=tmp_path / "r",
+            deps=deps,
+        )
+    assert outcome.status is PageStatus.VERIFIED
+    assert "rich00word000" in agent.calls[0]["ocr"]
+    async with factory() as session:
+        row = await session.scalar(select(Page).where(Page.job_id == job_id))
+        assert row is not None and row.omissions["reference"] == "native"
+        from src.pipeline.hashes import text_hash
+
+        assert row.ocr_hash == text_hash(agent.calls[0]["ocr"])
+
+
+async def test_native_first_disabled_uses_ocr(db, tmp_path: Path) -> None:
+    factory, created = db
+    pdf = _rich_pdf(tmp_path, pages=1)
+    job_id = await _job(factory, created, tmp_path, pages=1)
+    ocr = FakeOcr(text="ocr reference text")
+    agent = FakeAgent({1: [_env("# P1\nbody")]})
+    verifier = FakeAgent({1: [_verdict(97)]})
+    deps = _deps(ocr, agent, verifier, native_text_first=False, coverage_floor=0.0)
+    async with factory() as session:
+        outcome = await process_page(
+            session,
+            job_id=job_id,
+            page_number=1,
+            pdf_path=pdf,
+            renders_dir=tmp_path / "r",
+            deps=deps,
+        )
+    assert outcome.status is PageStatus.VERIFIED
+    assert ocr.calls and agent.calls[0]["ocr"] == "ocr reference text"
+    async with factory() as session:
+        row = await session.scalar(select(Page).where(Page.job_id == job_id))
+        assert row is not None and row.omissions["reference"] == "ocr"
+
+
+async def test_scanned_page_still_uses_ocr(db, tmp_path: Path) -> None:
+    factory, created = db
+    pdf = tmp_path / "scan.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.draw_rect(pymupdf.Rect(10, 10, 200, 200))  # image-only, no text layer
+    doc.save(pdf)
+    doc.close()
+    job_id = await _job(factory, created, tmp_path, pages=1)
+    ocr = FakeOcr(text="scanned ocr text")
+    agent = FakeAgent({1: [_env("# P1\nbody")]})
+    verifier = FakeAgent({1: [_verdict(97)]})
+    deps = _deps(
+        ocr, agent, verifier, native_text_first=True, native_text_min_words=20, coverage_floor=0.0
+    )
+    async with factory() as session:
+        outcome = await process_page(
+            session,
+            job_id=job_id,
+            page_number=1,
+            pdf_path=pdf,
+            renders_dir=tmp_path / "r",
+            deps=deps,
+        )
+    assert outcome.status is PageStatus.VERIFIED
+    assert ocr.calls and agent.calls[0]["ocr"] == "scanned ocr text"
+    async with factory() as session:
+        row = await session.scalar(select(Page).where(Page.job_id == job_id))
+        assert row is not None and row.omissions["reference"] == "ocr"
+
+
+async def test_native_retry_keeps_reference_and_bumps_dpi(db, tmp_path: Path) -> None:
+    """Native-routed retries sharpen the render but never switch reference:
+    the exact text stays, and the page is not re-OCR'd."""
+    factory, created = db
+    pdf = _rich_pdf(tmp_path, pages=1)
+    job_id = await _job(factory, created, tmp_path, pages=1)
+    ocr = FakeOcr(text="ocr text")
+
+    class _BoomOcr(FakeOcr):
+        async def run_page(self, *a, **k):
+            raise AssertionError("retries of native pages must not OCR")
+
+    seen_dpis: list[int] = []
+    real = real_render
+
+    def _render(pdf_path, page, dpi, out):
+        seen_dpis.append(dpi)
+        return real(pdf_path, page, dpi, out)
+
+    agent = FakeAgent({1: [_env("# P1"), _env("# P1")]})
+    verifier = FakeAgent({1: [_verdict(50, "retry", ["m"])] * 2})
+    deps = _deps(
+        _BoomOcr(),
+        agent,
+        verifier,
+        native_text_first=True,
+        max_page_retries=1,
+        coverage_floor=0.0,
+    )
+    deps.render_fn = _render
+    async with factory() as session:
+        outcome = await process_page(
+            session,
+            job_id=job_id,
+            page_number=1,
+            pdf_path=pdf,
+            renders_dir=tmp_path / "r",
+            deps=deps,
+        )
+    assert outcome.status is PageStatus.NEEDS_REVIEW
+    assert seen_dpis == [200, 300]  # retry bumped the render DPI
+    assert all("rich00word000" in call["ocr"] for call in agent.calls)
+    _ = ocr

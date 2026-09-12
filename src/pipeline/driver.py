@@ -64,6 +64,8 @@ class JobOptions:
     fig_details: bool = True
     thinking_transcribe: Effort = "low"
     thinking_diagram: Effort = "high"
+    native_text_first: bool = True
+    native_text_min_words: int = 20
     diagram_to_mermaid: bool = True
     diagram_min_confidence: int = 80
     diagram_verify: bool = True
@@ -83,6 +85,8 @@ class JobOptions:
             "fig_details": settings.FIG_DETAILS_BLOCKS,
             "thinking_transcribe": settings.THINKING_EFFORT_TRANSCRIBE,
             "thinking_diagram": settings.THINKING_EFFORT_DIAGRAM,
+            "native_text_first": settings.NATIVE_TEXT_FIRST,
+            "native_text_min_words": settings.NATIVE_TEXT_MIN_WORDS,
             "diagram_to_mermaid": settings.DIAGRAM_TO_MERMAID,
             "diagram_min_confidence": settings.DIAGRAM_MIN_CONFIDENCE,
             "diagram_verify": settings.DIAGRAM_VERIFY,
@@ -187,6 +191,8 @@ async def run_job(
             coverage_floor=options.coverage_floor,
             max_page_retries=options.max_page_retries,
             rolling_context_pages=options.rolling_context_pages,
+            native_text_first=options.native_text_first,
+            native_text_min_words=options.native_text_min_words,
         )
 
         async def _on_page(outcome: PageOutcome) -> None:
@@ -334,10 +340,15 @@ async def run_job(
                 max_page_retries=options.max_page_retries,
                 thinking_transcribe=options.thinking_transcribe,
                 thinking_diagram=options.thinking_diagram,
+                native_text_first=options.native_text_first,
+                native_text_min_words=options.native_text_min_words,
                 toc_enabled=options.toc_enabled,
                 fig_details=options.fig_details,
                 diagram_to_mermaid=options.diagram_to_mermaid,
                 diagram_min_confidence=options.diagram_min_confidence,
+                diagram_verify=options.diagram_verify,
+                diagram_fallback=options.diagram_fallback,
+                diagram_keep_image=options.diagram_keep_image,
             )
             report = build_report(
                 job_row,
@@ -462,7 +473,7 @@ async def _diagram_payloads(
     payloads = _payloads(omissions)
     if not payloads or not options.diagram_to_mermaid:
         return payloads
-    from src.pdf import native_text  # local import: text grounding for figures
+    from src.pdf import native_text_in_bbox  # bbox-clipped grounding for figures
 
     converter = GlmFlashAgent(
         settings.OLLAMA_CLOUD_URL,
@@ -497,7 +508,7 @@ async def _diagram_payloads(
             crops_dir=crops_dir,
             page_number=page_number,
             payload=payload,
-            native_text_fn=native_text,
+            native_text_fn=native_text_in_bbox,
             options=options,
             allowed_types=allowed_types,
         )
@@ -537,7 +548,7 @@ async def _convert_one(
     crops_dir: Path,
     page_number: int,
     payload: FigurePayload,
-    native_text_fn: Callable[[Path, int], str],
+    native_text_fn: Callable[[Path, int, tuple[float, float, float, float], Path | None], str],
     options: JobOptions,
     allowed_types: frozenset[str],
 ) -> DiagramResult:
@@ -553,7 +564,7 @@ async def _convert_one(
     except ValueError, OSError:
         return DiagramResult(convertible=False, reason="figure crop failed")
     try:
-        grounding = native_text_fn(pdf_path, page_number)
+        grounding = native_text_fn(pdf_path, page_number, payload.bbox, render_path)
     except Exception:  # noqa: BLE001 - grounding is best-effort
         grounding = ""
     return await convert_figure(

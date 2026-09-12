@@ -262,6 +262,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "max_page_retries": job_options.max_page_retries,
                 "thinking_transcribe": job_options.thinking_transcribe,
                 "thinking_diagram": job_options.thinking_diagram,
+                "native_text_first": job_options.native_text_first,
+                "native_text_min_words": job_options.native_text_min_words,
                 "toc_enabled": job_options.toc_enabled,
                 "fig_details": job_options.fig_details,
                 "diagram_to_mermaid": job_options.diagram_to_mermaid,
@@ -281,10 +283,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 max_page_retries=job_options.max_page_retries,
                 thinking_transcribe=job_options.thinking_transcribe,
                 thinking_diagram=job_options.thinking_diagram,
+                native_text_first=job_options.native_text_first,
+                native_text_min_words=job_options.native_text_min_words,
                 toc_enabled=job_options.toc_enabled,
                 fig_details=job_options.fig_details,
                 diagram_to_mermaid=job_options.diagram_to_mermaid,
                 diagram_min_confidence=job_options.diagram_min_confidence,
+                diagram_verify=job_options.diagram_verify,
+                diagram_fallback=job_options.diagram_fallback,
+                diagram_keep_image=job_options.diagram_keep_image,
             )
             async with factory() as session:
                 import hashlib
@@ -369,6 +376,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "fig_details",
                         "thinking_transcribe",
                         "thinking_diagram",
+                        "native_text_first",
+                        "native_text_min_words",
                         "diagram_to_mermaid",
                         "diagram_min_confidence",
                         "diagram_verify",

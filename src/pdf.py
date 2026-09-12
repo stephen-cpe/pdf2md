@@ -78,9 +78,7 @@ class RenderInfo:
 def native_text(pdf_path: Path, page_number: int) -> str:
     """Raw native text layer of one 1-based page ('' when none).
 
-    Used to ground diagram reinterpretation: text inside a figure's bbox is
-    the exact character reference for labels/values. Read-only, never raises
-    for out-of-range/undecodable pages (returns '').
+    Read-only, never raises for out-of-range/undecodable pages (returns '').
     """
     try:
         doc = pymupdf.open(pdf_path)
@@ -90,6 +88,76 @@ def native_text(pdf_path: Path, page_number: int) -> str:
         if page_number < 1 or page_number > doc.page_count:
             return ""
         return str(doc[page_number - 1].get_text())
+    except Exception:
+        return ""
+    finally:
+        doc.close()
+
+
+def native_text_if_viable(pdf_path: Path, page_number: int, min_words: int) -> str | None:
+    """Native text layer when substantial enough to serve as a reference.
+
+    Per-page routing input: a page with a trustworthy text layer needs no OCR
+    (exact characters, zero model calls); sparse layers (figure labels, cover
+    pages) and scanned pages return None so the OCR path runs. Viability is
+    word-count based. The character fallback applies ONLY to genuinely
+    space-less scripts (CJK): it requires a very low whitespace-token density
+    (long average token), so ordinary prose with a few words can never trip it.
+    Returns None on any defect.
+    """
+    text = native_text(pdf_path, page_number)
+    stripped = text.strip()
+    if not stripped:
+        return None
+    words = len(stripped.split())
+    if words >= min_words:
+        return text
+    # Space-less scripts: one "word" spans the line (CJK chars carry meaning).
+    if words > 0 and len(stripped) / words >= 8 and len(stripped) >= min_words * 3:
+        return text
+    return None
+
+
+def native_text_in_bbox(
+    pdf_path: Path,
+    page_number: int,
+    bbox: tuple[float, float, float, float],
+    render_path: Path | None = None,
+) -> str:
+    """Native text intersecting a figure bbox (absolute render pixels).
+
+    Diagram grounding must use only the text inside the figure region: the
+    whole-page text layer dilutes exact labels and invites the converter to
+    pull values from unrelated paragraphs. The agent bbox is in rendered-PNG
+    pixels (FR-AGT-3) while text geometry is in PDF points, so the box is
+    converted using the render's pixel dimensions (or the page's point size
+    when the render is unavailable). Returns '' on any defect — grounding is
+    best-effort and must never fail the figure.
+    """
+    try:
+        doc = pymupdf.open(pdf_path)
+    except Exception:
+        return ""
+    try:
+        if page_number < 1 or page_number > doc.page_count:
+            return ""
+        page = doc[page_number - 1]
+        x0, y0, x1, y1 = bbox
+        scale_x = scale_y = 1.0
+        if render_path is not None:
+            try:
+                probe = pymupdf.Pixmap(str(render_path))
+                if page.rect.width > 0 and page.rect.height > 0:
+                    scale_x = probe.width / page.rect.width
+                    scale_y = probe.height / page.rect.height
+            except Exception:
+                scale_x = scale_y = 1.0
+        if scale_x <= 0 or scale_y <= 0:
+            return ""
+        clip = pymupdf.Rect(x0 / scale_x, y0 / scale_y, x1 / scale_x, y1 / scale_y) & page.rect
+        if clip.is_empty:
+            return ""
+        return str(page.get_text("text", clip=clip)).strip()
     except Exception:
         return ""
     finally:
@@ -221,6 +289,8 @@ __all__ = [
     "crop_from_render",
     "extract_native_images",
     "native_text",
+    "native_text_if_viable",
+    "native_text_in_bbox",
     "preflight",
     "render_filename",
     "render_page",

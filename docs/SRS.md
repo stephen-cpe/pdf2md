@@ -99,6 +99,7 @@ A single technical user (developer/power user) running the app on their own desk
 
 | Note | Content |
 |---|---|
+| **Per-page reference routing** | A page with a substantial native text layer uses it as the character reference and skips OCR (exact characters, zero model calls, no degenerate-loop exposure); sparse/scanned pages call local `glm-ocr`. Retries keep the native reference and only re-render at higher DPI. Config-gated (`NATIVE_TEXT_FIRST`, default on) and part of the `pipeline_version` fingerprint. |
 | **Figures are reinterpreted as Mermaid (primary capability)** | Every flagged figure region is cropped, optionally grounded in the text inside it, converted to Mermaid by a dedicated Cloud call, validated against a type allowlist, and (by default) vision-verified against the crop. Fabricated nodes/edges/values fail verification. Non-convertible figures fall back to image+alt-text or a grounded data table — never silently dropped. |
 | **Tiered fallback, never silent loss** | Mermaid when validated+verified; OCR-grounded GFM table + image for data charts that fail conversion; image + alt-text + caption for photos/illustrations/maps or crop failures. The conversion report records per-figure status and the overall conversion rate. |
 | Agent reads **rendered page images**, not extracted text | Vision preserves layout, figures, and reading order — and is the only path that works for scanned pages. OCR text is a character reference, never the writer. |
@@ -161,7 +162,7 @@ A single technical user (developer/power user) running the app on their own desk
 |---|---|---|
 | 1 | **Preflight** | Validate PDF (readable, not encrypted, page count, size limits). Detect born-digital vs scanned. Record metadata. |
 | 2 | **Render** | Render every page to PNG at configurable DPI (default 200, auto-bump toward 400 for dense/small-font pages, with low-DPI fallback for degenerate OCR loops). Store in job workspace. |
-| 3 | **OCR pass** | For each page image, call local `glm-ocr` with its document-parsing prompts (`Text Recognition:`, `Table Recognition:`, `Formula Recognition:`) to get raw structured content. Store per-page OCR result. |
+| 3 | **OCR pass** | Reference routing: a page with a substantial native text layer uses that layer as the character reference and skips OCR entirely (exact characters, zero model calls). Pages with sparse or absent native text (scans, figure-only pages) call local `glm-ocr` with its document-parsing prompts (`Text Recognition:`, `Table Recognition:`, `Formula Recognition:`). The per-page reference kind is recorded in the page's omissions. |
 | 4 | **Agent transcription** | For each page, GLM-5.3-Flash receives: (a) the page image, (b) the GLM-OCR output, (c) rolling context (last N pages of produced Markdown + document outline so far). It produces the page's GFM, resolves reading order, merges multi-page constructs, and flags every figure region. |
 | 5 | **Page verify + coverage floor** | The agent compares the Markdown against the page image + OCR text (self-check pass), emitting a coverage verdict; **independently**, the deterministic floor computes token recall of the reference text in the produced Markdown. A page verifies only when BOTH the verdict passes at threshold AND the floor holds. Failures retry with higher DPI and/or explicit "you missed X" feedback (max R retries, default 2), then flag `needs_review`. |
 | 6 | **Diagram → Mermaid** | For every figure region flagged on a verified page: crop the region; ground it in native text inside the bbox (best effort); convert with a dedicated Cloud call; validate the Mermaid type against the allowlist and its structure; vision-verify the Mermaid against the crop. The result is a `DiagramResult` carrying Mermaid source, type, confidence, description, and (for data charts) a grounded table payload. |
@@ -215,22 +216,23 @@ Requirement IDs use `FR-<area>-<n>`. Priority: **M**ust / **S**hould / **C**ould
 | FR-PDF-3 | M | The system SHALL render each page to PNG at a configurable DPI (default 200). |
 | FR-PDF-4 | S | The system SHALL automatically re-render individual pages at higher DPI (up to 400) when verification reports low legibility, and fall back to lower DPIs plus text-layer extraction when OCR degenerates into loops. |
 | FR-PDF-5 | M | Rendered page images SHALL be stored in a per-job workspace directory and cleaned up per retention policy (default: delete on success, keep on failure; Windows file-lock contention is retried with backoff, then deferred — never failing a completed job). |
-| FR-PDF-6 | M | The system SHALL expose per-page native-text access (text layer, word count) for diagram grounding, without crashing on corrupt or undecodable pages (undecidable ⇒ return empty text; the figure still falls back to image). |
+| FR-PDF-6 | M | The system SHALL expose per-page native-text access (whole page) and bbox-clipped native-text access for figure grounding (text intersecting the figure region only, converting render-pixel bboxes to PDF points), without crashing on corrupt or undecodable pages (undecidable ⇒ return empty text; the figure still falls back to image). |
 
 ### 4.3 OCR Pass (OCR)
 
 | ID | Priority | Requirement |
 |---|---|---|
-| FR-OCR-1 | M | The system SHALL call the **local** Ollama `glm-ocr` model for every page image using its document-parsing prompt contract (Appendix A.1). |
-| FR-OCR-2 | M | Per-page OCR output (text, tables, formulas) SHALL be persisted with the page record before agent transcription begins for that page. |
-| FR-OCR-3 | M | If local Ollama or `glm-ocr` is unreachable at job start, preflight SHALL fail with actionable instructions (e.g. `ollama pull glm-ocr`). |
+| FR-OCR-1 | M | The system SHALL obtain a per-page character reference for every page: the native text layer when it is substantial (≥ `NATIVE_TEXT_MIN_WORDS` words, with a character fallback for space-less scripts) and `NATIVE_TEXT_FIRST` is enabled (default on), otherwise the **local** Ollama `glm-ocr` model using its document-parsing prompt contract (Appendix A.1). |
+| FR-OCR-2 | M | The character reference (native text or OCR) SHALL be persisted with the page record and used by the prompt contract and the coverage floor, without changing the page's verification semantics. |
+| FR-OCR-3 | M | If local Ollama or `glm-ocr` is unreachable when a page actually needs OCR, preflight SHALL fail with actionable instructions (e.g. `ollama pull glm-ocr`). |
 | FR-OCR-4 | S | The system SHOULD run OCR as a look-ahead pipeline (OCR page N+1 while the agent transcribes page N) to reduce wall-clock time without changing output. |
+| FR-OCR-5 | M | On retry, a page routed to the native reference SHALL keep that exact reference and only re-render at the higher DPI; only OCR-routed pages SHALL re-OCR. The reference kind (`native`/`ocr`) SHALL be recorded per page and surfaced in the report. |
 
 ### 4.3a Deterministic Coverage Floor (FLR)
 
 | ID | Priority | Requirement |
 |---|---|---|
-| FR-FLR-1 | M | The system SHALL compute, for every page attempt, a deterministic coverage score: the fraction of OCR-reference tokens present in the produced Markdown, after deterministic Markdown-syntax-noise stripping (fences, heading markers, link/image targets with alt/label text preserved). |
+| FR-FLR-1 | M | The system SHALL compute, for every page attempt, a deterministic coverage score: the fraction of reference tokens (native text when the page routed native, else OCR output) present in the produced Markdown, after deterministic Markdown-syntax-noise stripping (fences, heading markers, link/image targets with alt/label text preserved). |
 | FR-FLR-2 | M | A page SHALL be considered verified only when the agent verdict passes at threshold AND `floor_score ≥ COVERAGE_FLOOR_TOKENS` (default 80%); a floor failure triggers the same retry cycle as a verdict failure, with a corrective instruction naming the deficit. |
 | FR-FLR-3 | M | OCR references with fewer than `COVERAGE_FLOOR_MIN_OCR_TOKENS` tokens (default 30) are unmeasurable — the floor returns no score and never gates the page (the verdict alone stands). `COVERAGE_FLOOR_TOKENS=0` disables the floor. |
 | FR-FLR-4 | M | The floor score SHALL be recorded per page in `omissions.floor_score` (verified and needs_review checkpoints) and surfaced in the conversion report. Fabrication cannot raise the floor score — only reference tokens found in the Markdown count. |
@@ -267,13 +269,13 @@ Requirement IDs use `FR-<area>-<n>`. Priority: **M**ust / **S**hould / **C**ould
 
 | ID | Priority | Requirement |
 |---|---|---|
-| FR-DGM-1 | M | The system SHALL run a dedicated per-figure conversion stage after page verification: crop each flagged figure region, and (best effort) ground the conversion in native text inside the region. |
+| FR-DGM-1 | M | The system SHALL run a dedicated per-figure conversion stage after page verification: crop each flagged figure region, and (best effort) ground the conversion in native text clipped to the figure's bbox only (never the whole page). |
 | FR-DGM-2 | M | The conversion call (Appendix A.5) SHALL be a Cloud call using the same textual-envelope contract as the other Cloud calls, returning a convertible verdict, a Mermaid type, a confidence score, a description, and (for data charts) a grounded data payload. |
 | FR-DGM-3 | M | A candidate Mermaid SHALL pass deterministic validation before use: a recognized type on the first meaningful line, membership in the configurable allowlist (`DIAGRAM_ALLOWED_TYPES`), a non-empty body, and no leftover pipeline markers. |
 | FR-DGM-4 | M | When `DIAGRAM_VERIFY=true` (default), a second vision call SHALL compare the candidate Mermaid against the figure crop; a verdict below threshold, or any fabricated node/edge/label/value, SHALL reject the candidate. |
 | FR-DGM-5 | M | The system SHALL apply a tiered fallback, never silently dropping a figure: (a) validated+verified Mermaid; (b) for data charts, an OCR/agent-grounded GFM data table plus the image; (c) image + alt-text + caption. |
 | FR-DGM-6 | M | The chosen representation, Mermaid source, diagram type, and confidence SHALL be persisted on the figure's `images` row; the conversion report SHALL list per-figure status and the overall conversion rate. |
-| FR-DGM-7 | M | Conversion SHALL be config-gated (`DIAGRAM_TO_MERMAID`, default **on**) and SHALL participate in the `pipeline_version` fingerprint — a conversion-config change is a new job, never a silent resume mix. |
+| FR-DGM-7 | M | Conversion SHALL be config-gated (`DIAGRAM_TO_MERMAID`, default **on**) and every diagram behavior knob (`DIAGRAM_TO_MERMAID`, `DIAGRAM_MIN_CONFIDENCE`, `DIAGRAM_VERIFY`, `DIAGRAM_FALLBACK`, `DIAGRAM_KEEP_IMAGE`) SHALL participate in the `pipeline_version` fingerprint — a conversion-config change is a new job, never a silent resume mix. |
 
 ### 4.7 Assembly, Integrity & Report (QA)
 
@@ -590,6 +592,8 @@ Input: figure crop + grounding + candidate Mermaid. Output: the A.3 verdict enve
 | `COVERAGE_FLOOR_TOKENS` | `80` | Deterministic floor: OCR-token recall each page must meet (percent, `0` = off) |
 | `COVERAGE_FLOOR_MIN_OCR_TOKENS` | `30` | References with fewer tokens are unmeasurable and never gate |
 | `MAX_PAGE_RETRIES` | `2` | Verification retries per page |
+| `NATIVE_TEXT_FIRST` | `true` | Per-page routing: use a substantial native text layer as the character reference instead of OCR |
+| `NATIVE_TEXT_MIN_WORDS` | `20` | Native-layer word floor for reference routing (character fallback for space-less scripts) |
 | `MAX_PDF_MB` | `500` | Upload cap |
 | `MAX_PDF_PAGES` | `1000` | Page cap |
 | `THINKING_EFFORT_TRANSCRIBE` | `low` | GLM-5.3-Flash effort, page calls |

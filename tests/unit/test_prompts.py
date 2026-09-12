@@ -98,10 +98,15 @@ def _base_kwargs() -> dict:
         "max_page_retries": 2,
         "thinking_transcribe": "low",
         "thinking_diagram": "high",
+        "native_text_first": True,
+        "native_text_min_words": 20,
         "toc_enabled": True,
         "fig_details": True,
         "diagram_to_mermaid": True,
         "diagram_min_confidence": 80,
+        "diagram_verify": True,
+        "diagram_fallback": "both",
+        "diagram_keep_image": True,
     }
 
 
@@ -121,10 +126,15 @@ def test_pipeline_version_deterministic() -> None:
         "max_page_retries",
         "thinking_transcribe",
         "thinking_diagram",
+        "native_text_first",
+        "native_text_min_words",
         "toc_enabled",
         "fig_details",
         "diagram_to_mermaid",
         "diagram_min_confidence",
+        "diagram_verify",
+        "diagram_fallback",
+        "diagram_keep_image",
     ],
 )
 def test_pipeline_version_sensitive_to_every_input(key: str) -> None:
@@ -144,3 +154,19 @@ def test_pipeline_version_sensitive_to_prompts() -> None:
     other_prompts["transcription"] = "transcription-v99-test"
     changed = compute_pipeline_version(prompts=other_prompts, **other)
     assert changed != base
+
+
+def test_pipeline_version_covers_every_job_option() -> None:
+    """Drift guard: every JobOptions field must be a fingerprint input.
+
+    A behavior-changing option absent from compute_pipeline_version would let
+    a resumed job silently mix pipeline behavior.
+    """
+    import dataclasses
+
+    from src.pipeline.driver import JobOptions
+
+    job_option_fields = {f.name for f in dataclasses.fields(JobOptions)}
+    fingerprint_inputs = set(_base_kwargs())
+    missing = job_option_fields - fingerprint_inputs
+    assert not missing, f"JobOptions fields missing from pipeline_version: {sorted(missing)}"
