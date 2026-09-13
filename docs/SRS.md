@@ -226,7 +226,8 @@ Requirement IDs use `FR-<area>-<n>`. Priority: **M**ust / **S**hould / **C**ould
 | FR-OCR-2 | M | The character reference (native text or OCR) SHALL be persisted with the page record and used by the prompt contract and the coverage floor, without changing the page's verification semantics. |
 | FR-OCR-3 | M | If local Ollama or `glm-ocr` is unreachable when a page actually needs OCR, preflight SHALL fail with actionable instructions (e.g. `ollama pull glm-ocr`). |
 | FR-OCR-4 | S | The system SHOULD run OCR as a look-ahead pipeline (OCR page N+1 while the agent transcribes page N) to reduce wall-clock time without changing output. |
-| FR-OCR-5 | M | On retry, a page routed to the native reference SHALL keep that exact reference and only re-render at the higher DPI; only OCR-routed pages SHALL re-OCR. The reference kind (`native`/`ocr`) SHALL be recorded per page and surfaced in the report. |
+| FR-OCR-5 | M | On retry, a page routed to the native reference SHALL keep that exact reference and only re-render at the higher DPI; only OCR-routed pages SHALL re-OCR. The reference kind (`native`/`ocr`/`vision`) SHALL be recorded per page and surfaced in the report. |
+| FR-OCR-6 | M | `OCR_ENABLED=false` SHALL disable the local OCR stage entirely: pages without a viable native layer transcribe vision-only with an empty reference (never gated by the floor), and no `glm-ocr` call SHALL be made. The flag SHALL participate in the `pipeline_version` fingerprint. |
 
 ### 4.3a Deterministic Coverage Floor (FLR)
 
@@ -593,6 +594,7 @@ Input: figure crop + grounding + candidate Mermaid. Output: the A.3 verdict enve
 | `COVERAGE_FLOOR_MIN_OCR_TOKENS` | `30` | References with fewer tokens are unmeasurable and never gate |
 | `MAX_PAGE_RETRIES` | `2` | Verification retries per page |
 | `NATIVE_TEXT_FIRST` | `true` | Per-page routing: use a substantial native text layer as the character reference instead of OCR |
+| `OCR_ENABLED` | `true` | Master OCR switch; `false` = vision-only for pages without native text, zero `glm-ocr` calls |
 | `NATIVE_TEXT_MIN_WORDS` | `20` | Native-layer word floor for reference routing (character fallback for space-less scripts) |
 | `MAX_PDF_MB` | `500` | Upload cap |
 | `MAX_PDF_PAGES` | `1000` | Page cap |

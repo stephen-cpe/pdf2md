@@ -70,6 +70,9 @@ class PageDeps:
     native_text_first: bool = False
     native_text_min_words: int = 20
     native_text_fn: NativeTextFn = native_text_if_viable
+    # Master OCR switch. False = never call the OCR model: pages without a
+    # viable native layer transcribe vision-only with an empty reference.
+    ocr_enabled: bool = True
 
 
 @dataclass
@@ -208,13 +211,13 @@ async def process_page(
     if native is not None:
         ocr_text, width, height, actual_dpi = native
         first_ms = (time.perf_counter() - start) * 1000.0
-        reference_is_native = True
+        reference_kind = "native"
     else:
         ocr_text, width, height, actual_dpi = await _render_ocr(
             pdf_path, page_number, deps.render_dpi, render_path, deps
         )
         first_ms = (time.perf_counter() - start) * 1000.0
-        reference_is_native = False
+        reference_kind = "ocr" if deps.ocr_enabled else "vision"
     return await _cycles(
         session,
         job_id=job_id,
@@ -229,7 +232,7 @@ async def process_page(
         deps=deps,
         rolling_context=rolling_context,
         outline=outline,
-        reference_is_native=reference_is_native,
+        reference_kind=reference_kind,
     )
 
 
@@ -279,6 +282,12 @@ async def _run_loop(
 
     async def _ocr_for(page_number: int) -> tuple[str, RenderInfo, Path]:
         path = renders_dir / render_filename(page_number)
+        if not deps.ocr_enabled:
+            # Vision-only arm: render once at base DPI, empty reference.
+            info = await asyncio.to_thread(
+                deps.render_fn, pdf_path, page_number, deps.render_dpi, path
+            )
+            return "", info, path
         # use same fallback logic as _render_ocr but return RenderInfo
         last_exc: BaseException | None = None
         for try_dpi in _fallback_dpis(deps.render_dpi):
@@ -432,6 +441,7 @@ async def _transcribe_verify_only(
         deps=deps,
         rolling_context=rolling_context,
         outline=outline,
+        reference_kind="vision" if not deps.ocr_enabled else "ocr",
     )
 
 
@@ -515,14 +525,20 @@ async def _render_ocr(
 ) -> tuple[str, int, int, int]:
     """Render + OCR one page; returns (ocr_text, width, height, actual_dpi).
 
-    Tries lower DPIs on OCR timeout/degenerate output. High-res dense
-    pages can cause glm-ocr to enter an infinite fence loop that never
-    triggers the httpx idle timeout (token trickle). Detected via
-    _is_degenerate_ocr and wall-clock wait_for in GlmOcrEngine, then
-    retried at a lower DPI. Final fallback: pymupdf text extraction
-    (born-digital path) so the job never hangs forever (NFR-1 never
-    silently drops a page; hang is worse than fallback).
+    When the OCR stage is disabled (ablation / OCR-free arm), this renders
+    once at the requested DPI and returns an empty reference — vision-only,
+    zero local model calls. The caller records reference "vision".
+    Otherwise the full ladder below applies: tries lower DPIs on OCR
+    timeout/degenerate output. High-res dense pages can cause glm-ocr to
+    enter an infinite fence loop that never triggers the httpx idle timeout
+    (token trickle). Detected via _is_degenerate_ocr and wall-clock wait_for
+    in GlmOcrEngine, then retried at a lower DPI. Final fallback: pymupdf
+    text extraction (born-digital path) so the job never hangs forever
+    (NFR-1 never silently drops a page; hang is worse than fallback).
     """
+    if not deps.ocr_enabled:
+        info = await asyncio.to_thread(deps.render_fn, pdf_path, page_number, dpi, render_path)
+        return "", info.width, info.height, dpi
     last_exc: BaseException | None = None
     for try_dpi in _fallback_dpis(dpi):
         try:
@@ -659,13 +675,14 @@ async def _cycles(
     rolling_context: str,
     outline: str,
     ocr_ms_base: float = 0.0,
-    reference_is_native: bool = False,
+    reference_kind: str = "ocr",
 ) -> PageOutcome:
     """Shared verify-retry core (4.2).
 
-    Retries re-render at higher DPI (FR-PDF-4). When the reference was the
-    native text layer, retries keep that exact reference and only sharpen the
-    image; otherwise retries re-OCR the new render (FR-OCR-2).
+    Retries re-render at higher DPI (FR-PDF-4). A native reference is kept
+    verbatim on retry while only the render sharpens; a vision-only page
+    (OCR disabled, no native layer) simply re-renders with its empty
+    reference. OCR pages re-OCR the new render (FR-OCR-2).
     """
     misses_note = ""
     best_markdown = ""
@@ -680,25 +697,25 @@ async def _cycles(
     transcribe_ms = verify_ms = 0.0
     outcome_dpi = dpi
     outcome_width, outcome_height = width, height
-    reference_kind = "native" if reference_is_native else "ocr"
     for attempt in range(deps.max_page_retries + 1):
         if attempt > 0:
             # An agentic retry: (re-)render at the next DPI step.
             outcome_dpi = min(deps.max_dpi, outcome_dpi + deps.dpi_step)
             start = time.perf_counter()
-            if reference_is_native:
-                info = await asyncio.to_thread(
-                    deps.render_fn, pdf_path, page_number, outcome_dpi, render_path
-                )
-                outcome_width, outcome_height = info.width, info.height
-                ocr_ms += (time.perf_counter() - start) * 1000.0
-                width, height = outcome_width, outcome_height
-            else:
+            if reference_kind == "ocr":
                 ocr_text, outcome_width, outcome_height, actual_dpi = await _render_ocr(
                     pdf_path, page_number, outcome_dpi, render_path, deps
                 )
                 # actual_dpi may be lower than outcome_dpi if fallback triggered
                 outcome_dpi = actual_dpi
+                ocr_ms += (time.perf_counter() - start) * 1000.0
+                width, height = outcome_width, outcome_height
+            else:
+                # Native or vision-only: keep the reference, sharpen the image.
+                info = await asyncio.to_thread(
+                    deps.render_fn, pdf_path, page_number, outcome_dpi, render_path
+                )
+                outcome_width, outcome_height = info.width, info.height
                 ocr_ms += (time.perf_counter() - start) * 1000.0
                 width, height = outcome_width, outcome_height
         context = (rolling_context + misses_note).strip()

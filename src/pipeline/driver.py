@@ -66,6 +66,7 @@ class JobOptions:
     thinking_diagram: Effort = "high"
     native_text_first: bool = True
     native_text_min_words: int = 20
+    ocr_enabled: bool = True
     diagram_to_mermaid: bool = True
     diagram_min_confidence: int = 80
     diagram_verify: bool = True
@@ -87,6 +88,7 @@ class JobOptions:
             "thinking_diagram": settings.THINKING_EFFORT_DIAGRAM,
             "native_text_first": settings.NATIVE_TEXT_FIRST,
             "native_text_min_words": settings.NATIVE_TEXT_MIN_WORDS,
+            "ocr_enabled": settings.OCR_ENABLED,
             "diagram_to_mermaid": settings.DIAGRAM_TO_MERMAID,
             "diagram_min_confidence": settings.DIAGRAM_MIN_CONFIDENCE,
             "diagram_verify": settings.DIAGRAM_VERIFY,
@@ -193,6 +195,7 @@ async def run_job(
             rolling_context_pages=options.rolling_context_pages,
             native_text_first=options.native_text_first,
             native_text_min_words=options.native_text_min_words,
+            ocr_enabled=options.ocr_enabled,
         )
 
         async def _on_page(outcome: PageOutcome) -> None:
@@ -342,6 +345,7 @@ async def run_job(
                 thinking_diagram=options.thinking_diagram,
                 native_text_first=options.native_text_first,
                 native_text_min_words=options.native_text_min_words,
+                ocr_enabled=options.ocr_enabled,
                 toc_enabled=options.toc_enabled,
                 fig_details=options.fig_details,
                 diagram_to_mermaid=options.diagram_to_mermaid,

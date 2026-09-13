@@ -59,6 +59,10 @@ def test_defaults_match_appendix_b(monkeypatch: pytest.MonkeyPatch, tmp_path) ->
     assert "flowchart" in s.allowed_diagram_types()
     assert "sequenceDiagram" in s.allowed_diagram_types()
     assert "xychart-beta" in s.allowed_diagram_types()
+    # Reference routing + OCR switch.
+    assert s.NATIVE_TEXT_FIRST is True
+    assert s.NATIVE_TEXT_MIN_WORDS == 20
+    assert s.OCR_ENABLED is True
 
 
 def test_missing_api_key_fails_clear(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:

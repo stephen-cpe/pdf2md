@@ -173,6 +173,105 @@ async def _job_error(factory, jid):
         return job.error if job is not None else None
 
 
+async def test_driver_ocr_disabled_scanned_completes_vision_only(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """End-to-end with OCR disabled on a text-free page: the job still
+    completes, no OCR call is made, and the page is marked vision-only."""
+    settings = load_settings()
+    dsn = settings.DATABASE_URL.get_secret_value()
+    engine = engine_mod.create_engine(dsn)
+    factory = engine_mod.session_factory(engine)
+    created: list = []
+    try:
+        pdf = tmp_path / "scan.pdf"
+        doc = pymupdf.open()
+        doc.new_page().draw_rect(pymupdf.Rect(10, 10, 200, 200))
+        doc.save(pdf)
+        doc.close()
+        out = tmp_path / "out"
+        out.mkdir()
+        async with factory() as session:
+            job = await repo.create_job(
+                session,
+                filename=f"drvscan-{uuid.uuid4().hex}.pdf",
+                file_sha256="s" * 64,
+                page_count=1,
+                output_dir=str(out),
+                options={},
+            )
+            created.append(job.id)
+            jid = job.id
+        options = JobOptions(
+            render_dpi=200,
+            coverage_threshold=90,
+            max_page_retries=1,
+            ocr_enabled=False,
+        )
+
+        class _BoomOcr:
+            async def run_page(self, *a, **k):
+                raise AssertionError("OCR must never run when disabled")
+
+        fakes = {
+            "ocr": _BoomOcr(),
+            "agent": _Agent({1: [_env("# Scanned\nbody")]}),
+            "verifier": _Agent({1: [_verdict()]}),
+        }
+        real_page_deps = driver_mod.PageDeps
+
+        def _fake_deps(**kwargs):
+            _ = kwargs
+            return real_page_deps(
+                ocr=fakes["ocr"],
+                agent=fakes["agent"],
+                verifier=fakes["verifier"],
+                render_dpi=options.render_dpi,
+                coverage_threshold=options.coverage_threshold,
+                max_page_retries=options.max_page_retries,
+                native_text_first=options.native_text_first,
+                native_text_min_words=options.native_text_min_words,
+                ocr_enabled=options.ocr_enabled,
+            )
+
+        monkeypatch.setattr(driver_mod, "PageDeps", _fake_deps)
+        monkeypatch.setattr(driver_mod, "GlmFlashAgent", lambda *a, **k: _Agent({}))
+        emitted: list[dict] = []
+
+        async def _emit(event: dict) -> None:
+            emitted.append(event)
+
+        workspace = Workspace(tmp_path / "ws")
+        result = await run_job(
+            factory=factory,
+            settings=settings,
+            workspace=workspace,
+            job_id=jid,
+            pdf_path=pdf,
+            output_dir=out,
+            options=options,
+            control=JobControl(),
+            emit=_emit,
+        )
+        assert result == "completed", await _job_error(factory, jid)
+        assert (out / "scan.md").is_file()
+        from sqlalchemy import select
+
+        from src.db.models import Page
+
+        async with factory() as session:
+            page = await session.scalar(select(Page).where(Page.job_id == jid))
+            assert page is not None and page.omissions["reference"] == "vision"
+    finally:
+        async with factory() as session:
+            for job_id in created:
+                job = await session.get(Job, job_id)
+                if job is not None:
+                    await session.delete(job)
+            await session.commit()
+        await engine.dispose()
+
+
 async def test_driver_converts_figure_to_mermaid(tmp_path: Path, monkeypatch) -> None:
     """End-to-end: a FIGURES region is reinterpreted and emitted as Mermaid."""
     from src.pipeline.diagrams import DiagramResult
@@ -217,6 +316,7 @@ async def test_driver_converts_figure_to_mermaid(tmp_path: Path, monkeypatch) ->
                 max_page_retries=options.max_page_retries,
                 native_text_first=options.native_text_first,
                 native_text_min_words=options.native_text_min_words,
+                ocr_enabled=options.ocr_enabled,
             )
 
         monkeypatch.setattr(driver_mod, "PageDeps", _fake_deps)

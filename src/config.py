@@ -78,6 +78,11 @@ class Settings(BaseSettings):
     # only for scanned/sparse pages and as the retry escalation.
     NATIVE_TEXT_FIRST: bool = True
     NATIVE_TEXT_MIN_WORDS: PositiveInt = 20
+    # Master switch for the local OCR stage. False = never call glm-ocr:
+    # scanned/sparse pages transcribe vision-only (empty reference), native
+    # pages still use their text layer. Recorded in the fingerprint so the
+    # two arms of an ablation can never be confused.
+    OCR_ENABLED: bool = True
     THINKING_EFFORT_TRANSCRIBE: Literal["low", "high"] = "low"
     THINKING_EFFORT_DIAGRAM: Literal["low", "high"] = "high"
     TOC_ENABLED: bool = True

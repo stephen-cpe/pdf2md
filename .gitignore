@@ -1,6 +1,6 @@
 # --- Secrets & local state (never commit) ---
 .env
-output/
+*output*/
 *workspace*/
 *workspaces*/
 corpus/
@@ -22,11 +22,3 @@ __pycache__/
 # --- Others ---
 *.bak
 *.exe
-
-# --- Eval harness artifacts (generated; scripts + goldenset are committed) ---
-eval/baseline-md/
-eval/pdf2md-md/
-eval/ocp-agentic-md/
-eval/results*.json
-.codedump/
-

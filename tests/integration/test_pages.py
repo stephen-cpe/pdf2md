@@ -777,3 +777,138 @@ async def test_native_retry_keeps_reference_and_bumps_dpi(db, tmp_path: Path) ->
     assert seen_dpis == [200, 300]  # retry bumped the render DPI
     assert all("rich00word000" in call["ocr"] for call in agent.calls)
     _ = ocr
+
+
+# --- 4.7 OCR disabled (vision-only arm) ---
+
+
+async def test_ocr_disabled_native_still_used(db, tmp_path: Path) -> None:
+    """Disabling OCR must not disable the native reference: a text-rich page
+    still routes native and the (absent) OCR engine is never touched."""
+    factory, created = db
+    pdf = _rich_pdf(tmp_path, pages=1)
+    job_id = await _job(factory, created, tmp_path, pages=1)
+    agent = FakeAgent({1: [_env("# P1\nbody")]})
+    verifier = FakeAgent({1: [_verdict(97)]})
+
+    class _BoomOcr:
+        async def run_page(self, *a, **k):
+            raise AssertionError("OCR must never run when disabled")
+
+    deps = _deps(
+        _BoomOcr(),
+        agent,
+        verifier,
+        native_text_first=True,
+        native_text_min_words=20,
+        ocr_enabled=False,
+        coverage_floor=0.0,
+    )
+    async with factory() as session:
+        outcome = await process_page(
+            session,
+            job_id=job_id,
+            page_number=1,
+            pdf_path=pdf,
+            renders_dir=tmp_path / "r",
+            deps=deps,
+        )
+    assert outcome.status is PageStatus.VERIFIED
+    assert "rich00word000" in agent.calls[0]["ocr"]
+    async with factory() as session:
+        row = await session.scalar(select(Page).where(Page.job_id == job_id))
+        assert row is not None and row.omissions["reference"] == "native"
+
+
+async def test_ocr_disabled_scanned_runs_vision_only(db, tmp_path: Path) -> None:
+    """No native layer + no OCR = vision-only: empty reference, judge-only
+    gating, and the page still completes."""
+    factory, created = db
+    pdf = tmp_path / "scan.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.draw_rect(pymupdf.Rect(10, 10, 200, 200))  # image-only, no text layer
+    doc.save(pdf)
+    doc.close()
+    job_id = await _job(factory, created, tmp_path, pages=1)
+    agent = FakeAgent({1: [_env("# P1\nbody")]})
+    verifier = FakeAgent({1: [_verdict(97)]})
+
+    class _BoomOcr:
+        async def run_page(self, *a, **k):
+            raise AssertionError("OCR must never run when disabled")
+
+    deps = _deps(
+        _BoomOcr(),
+        agent,
+        verifier,
+        native_text_first=True,
+        native_text_min_words=20,
+        ocr_enabled=False,
+        coverage_floor=0.0,
+    )
+    async with factory() as session:
+        outcome = await process_page(
+            session,
+            job_id=job_id,
+            page_number=1,
+            pdf_path=pdf,
+            renders_dir=tmp_path / "r",
+            deps=deps,
+        )
+    assert outcome.status is PageStatus.VERIFIED
+    assert agent.calls[0]["ocr"] == ""
+    async with factory() as session:
+        row = await session.scalar(select(Page).where(Page.job_id == job_id))
+        assert row is not None and row.omissions["reference"] == "vision"
+
+
+async def test_ocr_disabled_retry_rerenders_without_ocr(db, tmp_path: Path) -> None:
+    """Vision-only retries sharpen the render at the next DPI; the reference
+    stays empty and no OCR call is made."""
+    factory, created = db
+    pdf = tmp_path / "scan.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.draw_rect(pymupdf.Rect(10, 10, 200, 200))
+    doc.save(pdf)
+    doc.close()
+    job_id = await _job(factory, created, tmp_path, pages=1)
+
+    class _BoomOcr:
+        async def run_page(self, *a, **k):
+            raise AssertionError("retries must not OCR when disabled")
+
+    seen_dpis: list[int] = []
+    real = real_render
+
+    def _render(pdf_path, page, dpi, out):
+        seen_dpis.append(dpi)
+        return real(pdf_path, page, dpi, out)
+
+    agent = FakeAgent({1: [_env("# P1"), _env("# P1")]})
+    verifier = FakeAgent({1: [_verdict(50, "retry", ["m"])] * 2})
+    deps = _deps(
+        _BoomOcr(),
+        agent,
+        verifier,
+        ocr_enabled=False,
+        max_page_retries=1,
+        coverage_floor=0.0,
+    )
+    deps.render_fn = _render
+    async with factory() as session:
+        outcome = await process_page(
+            session,
+            job_id=job_id,
+            page_number=1,
+            pdf_path=pdf,
+            renders_dir=tmp_path / "r",
+            deps=deps,
+        )
+    assert outcome.status is PageStatus.NEEDS_REVIEW
+    assert seen_dpis == [200, 300]
+    assert all(call["ocr"] == "" for call in agent.calls)
+    async with factory() as session:
+        row = await session.scalar(select(Page).where(Page.job_id == job_id))
+        assert row is not None and row.omissions["reference"] == "vision"
